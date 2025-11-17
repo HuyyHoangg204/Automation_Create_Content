@@ -234,6 +234,66 @@ const openapi = {
         },
       },
     },
+    '/chrome/profiles-folder': {
+      get: {
+        summary: 'Get current profiles base directory',
+        tags: ['profile'],
+        description: 'Returns the folder path where Chrome profiles are stored. Default is platform-specific (Windows: AppData\\Local\\Automation_Profiles, macOS: ~/Library/Application Support/Automation_Profiles, Linux: ~/.config/automation_profiles)',
+        responses: {
+          200: {
+            description: 'OK',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    profilesBaseDir: { type: 'string', description: 'Absolute path to profiles base directory' },
+                  },
+                  required: ['profilesBaseDir'],
+                },
+              },
+            },
+          },
+        },
+      },
+      put: {
+        summary: 'Set profiles base directory',
+        tags: ['profile'],
+        description: 'Changes the folder where Chrome profiles are stored. The folder will be created if it does not exist. Configuration is saved to .profiles-config.json',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  folder: { type: 'string', description: 'Path to folder (absolute or relative). Will be resolved to absolute path.' },
+                },
+                required: ['folder'],
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: 'OK',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    profilesBaseDir: { type: 'string', description: 'Resolved absolute path to profiles base directory' },
+                    message: { type: 'string', description: 'Success message' },
+                  },
+                  required: ['profilesBaseDir', 'message'],
+                },
+              },
+            },
+          },
+          400: { description: 'Bad Request - validation error' },
+        },
+      },
+    },
     '/gemini/gems/send-prompt': {
       post: {
         summary: 'Send a prompt to a specific Gem in Gemini',
