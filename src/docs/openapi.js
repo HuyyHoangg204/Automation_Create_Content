@@ -382,6 +382,65 @@ const openapi = {
         },
       },
     },
+    '/gemini/execute': {
+      post: {
+        summary: 'Execute complete workflow: Generate outline in NotebookLM → Send prompt to Gemini',
+        tags: ['gemini'],
+        description: 'Executes a complete workflow: (1) Launches NotebookLM to generate an outline based on sources (website, YouTube, or text), (2) Saves the outline to a file in the upload directory, (3) Uploads the outline file to an existing Gem and sends a prompt. Returns detailed results for each step.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  name: { type: 'string', description: 'Profile name to use (alternative to userDataDir)' },
+                  userDataDir: { type: 'string', description: 'Profile user-data-dir (alternative to name)' },
+                  profileDirName: { type: 'string', description: 'Profile directory name', default: 'Default' },
+                  debugPort: { type: 'integer', description: 'Optional DevTools port if not default' },
+                  notebookWebsite: { type: 'array', items: { type: 'string', format: 'url' }, description: 'Array of website URLs to add as sources in NotebookLM (optional)' },
+                  notebookYoutube: { type: 'array', items: { type: 'string', format: 'url' }, description: 'Array of YouTube URLs to add as sources in NotebookLM (optional)' },
+                  notebookTextContent: { type: 'string', description: 'Text content to paste as source in NotebookLM (optional)' },
+                  notebookPrompt: { type: 'string', description: 'Prompt to generate outline in NotebookLM (required)' },
+                  gem: { type: 'string', description: 'Name of existing Gem to send prompt to (required)' },
+                  geminiPrompt: { type: 'string', description: 'Prompt to send to Gemini with the outline file (required)' },
+                },
+                required: ['gem', 'notebookPrompt', 'geminiPrompt'],
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: 'OK',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean', description: 'Whether all steps completed successfully' },
+                    results: {
+                      type: 'object',
+                      properties: {
+                        step1_notebooklm: { type: 'object', description: 'Result from launchNotebookLM step' },
+                        step2_sendPrompt: { type: 'object', description: 'Result from sendPrompt step' },
+                        outputFile: { type: 'string', description: 'Path to the generated outline file' },
+                        error: { type: 'string', nullable: true, description: 'Error message if any step failed' },
+                      },
+                    },
+                    message: { type: 'string', description: 'Success message if all steps completed' },
+                    error: { type: 'string', nullable: true, description: 'Error message if workflow failed' },
+                  },
+                  required: ['success', 'results'],
+                },
+              },
+            },
+          },
+          400: { description: 'Bad Request - validation error' },
+          404: { description: 'Profile not found' },
+        },
+      },
+    },
     '/gemini/gems': {
       post: {
         summary: 'Open Explore Gems and try to create a new Gem',

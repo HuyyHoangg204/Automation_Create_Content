@@ -707,72 +707,93 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt }) {
     // Wait for sidebar to load
     await new Promise((r) => setTimeout(r, 2000));
 
-    // Step 1: Find and click the Gem by name in sidebar
-    // Try to click the gem - prioritize button.bot-new-conversation-button inside bot-list-item
+    // Step 1: Click "Explore Gems" button to open Gem manager
+    const clickedExplore = await clickSelectors(page, [
+      'button[aria-label="Explore Gems"]',
+      'button[aria-label*="Explore Gems" i]',
+      '[aria-label="Explore Gems"]',
+    ], { timeoutMs: 12000 }) || await clickByText(page, ['Explore Gems', 'Khám phá Gems'], { timeoutMs: 8000 });
+
+    if (!clickedExplore) {
+      status = 'explore_button_not_found';
+      return { status, error: 'Explore Gems button not found' };
+    }
+
+    // Wait for navigation to Gem manager page
+    await Promise.race([
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {}),
+      new Promise((r) => setTimeout(r, 2000)),
+    ]);
+
+    // Wait for Gem manager page to load
+    await new Promise((r) => setTimeout(r, 2000));
+
+    // Step 2: Find and click the Gem by name in Gem manager page
+    // Gems are in bot-list-row elements within [data-test-id="your-gems-list"]
     const gemClicked = await page.evaluate((gemName) => {
       const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
       const targetName = norm(gemName);
       
-      // First, try to find button.bot-new-conversation-button (the actual clickable element)
-      const buttons = document.querySelectorAll('button.bot-new-conversation-button');
+      // Find "Your Gems" container
+      const yourGemsList = document.querySelector('[data-test-id="your-gems-list"]');
+      if (!yourGemsList) {
+        return { clicked: false, error: 'your-gems-list not found' };
+      }
       
-      for (const button of buttons) {
-        const text = norm(button.textContent || button.innerText || '');
-        
-        // Try exact match first
-        if (text === targetName) {
-          try {
-            button.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
-            button.focus();
-            button.click();
-            return { clicked: true, method: 'exact_match_button', text, element: 'button' };
-          } catch (e) {
-            // Continue to next item
+      // Find all bot-list-row elements
+      const botListRows = yourGemsList.querySelectorAll('bot-list-row');
+      
+      for (const row of botListRows) {
+        // Find title span in each row
+        const titleSpan = row.querySelector('span.gds-title-m.title, .gds-title-m.title, div.title-container span.gds-title-m.title');
+        if (titleSpan) {
+          const text = norm(titleSpan.textContent || titleSpan.innerText || '');
+          
+          // Try exact match
+          if (text === targetName) {
+            try {
+              // Find clickable element inside row (usually an <a> tag with class "bot-row")
+              const clickable = row.querySelector('a.bot-row, button, [role="button"]') || row;
+              clickable.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+              clickable.focus();
+              clickable.click();
+              return { clicked: true, method: 'exact_match', text, element: 'bot-list-row' };
+            } catch (e) {
+              // Continue to next row
+            }
           }
-        }
-        
-        // Try contains match (text includes targetName or targetName includes text)
-        if (text.includes(targetName) || targetName.includes(text)) {
-          try {
-            button.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
-            button.focus();
-            button.click();
-            return { clicked: true, method: 'contains_match_button', text, element: 'button' };
-          } catch (e) {
-            // Continue to next item
+          
+          // Try contains match
+          if (text.includes(targetName) || targetName.includes(text)) {
+            try {
+              const clickable = row.querySelector('a.bot-row, button, [role="button"]') || row;
+              clickable.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+              clickable.focus();
+              clickable.click();
+              return { clicked: true, method: 'contains_match', text, element: 'bot-list-row' };
+            } catch (e) {
+              // Continue to next row
+            }
           }
         }
       }
       
-      // Fallback: try bot-list-item itself
-      const botListItems = document.querySelectorAll('bot-list-item');
-      for (const item of botListItems) {
-        const text = norm(item.textContent || item.innerText || '');
-        
-        // Try to find button inside this bot-list-item
-        const innerButton = item.querySelector('button.bot-new-conversation-button');
-        if (innerButton) {
+      // Fallback: try all bot-list-row in page
+      const allBotListRows = document.querySelectorAll('bot-list-row');
+      for (const row of allBotListRows) {
+        const titleSpan = row.querySelector('span.gds-title-m.title, .gds-title-m.title');
+        if (titleSpan) {
+          const text = norm(titleSpan.textContent || titleSpan.innerText || '');
           if (text === targetName || text.includes(targetName) || targetName.includes(text)) {
             try {
-              innerButton.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
-              innerButton.focus();
-              innerButton.click();
-              return { clicked: true, method: 'contains_match_inner_button', text, element: 'inner_button' };
+              const clickable = row.querySelector('a.bot-row, button, [role="button"]') || row;
+              clickable.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+              clickable.focus();
+              clickable.click();
+              return { clicked: true, method: 'fallback_match', text, element: 'bot-list-row' };
             } catch (e) {
               // Continue
             }
-          }
-        }
-        
-        // Last resort: click the bot-list-item itself
-        if (text === targetName || text.includes(targetName) || targetName.includes(text)) {
-          try {
-            item.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
-            item.focus();
-            item.click();
-            return { clicked: true, method: 'contains_match_item', text, element: 'bot-list-item' };
-          } catch (e) {
-            // Continue
           }
         }
       }
@@ -790,11 +811,17 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt }) {
       const clicked = await clickByText(page, [gem], { timeoutMs: 5000 });
       if (!clicked) {
         status = 'gem_not_found';
-        return { status, error: `Gem "${gem}" not found in sidebar` };
+        return { status, error: `Gem "${gem}" not found in Gem manager page` };
       }
     }
 
-    // Wait for gem to load
+    // Wait for navigation back to chat page
+    await Promise.race([
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {}),
+      new Promise((r) => setTimeout(r, 2000)),
+    ]);
+
+    // Wait for gem chat to load
     await new Promise((r) => setTimeout(r, 2000));
     
     // Step 2: Upload files if provided (using direct file assignment method)

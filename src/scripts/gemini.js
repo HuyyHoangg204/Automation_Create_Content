@@ -1,4 +1,3 @@
-const { logger } = require('../logger');
 const { connectToBrowserByUserDataDir } = require('./gmailLogin');
 
 async function clickByText(page, texts, options = {}) {
@@ -156,77 +155,226 @@ async function findFieldByLabel(page, labelTexts) {
 
 async function uploadKnowledgeFiles(page, files) {
   if (!files || !files.length) return false;
-  // 1) Preferred path: click the plus in Knowledge -> catch filechooser -> accept() files immediately.
   const existing = files.filter((p) => {
     try { return fs.existsSync(p); } catch (_) { return false; }
   });
   if (!existing.length) return false;
 
   try {
-    // Click the small plus in Knowledge footer (NOT the 'Add from Drive' item)
-    const clickedPlus = await clickSelectors(page, [
-      'button[data-test-id="bot-uploader-button"]',
-      'div.file-upload-footer button'
-    ], { timeoutMs: 1500 }).catch(() => {});
-
-    // Register filechooser and try to click the Upload files item in the opened menu
-    const chooserPromise = new Promise((resolve) => page.once('filechooser', resolve));
-    const clickedUploadItem = await clickSelectors(page, [
-      'button[data-test-id="local-images-files-uploader-button"]',
-      'button[aria-label="Upload files"]',
-    ], { timeoutMs: 1500 }).catch(() => {});
-    if (clickedUploadItem) {
-      const fileChooser = await Promise.race([
-        chooserPromise,
-        new Promise((resolve, reject) => setTimeout(() => reject(new Error('no filechooser')), 2000)),
-      ]);
-      if (fileChooser) {
-        await fileChooser.accept(existing);
+    // Step 1: Patch HTMLInputElement.prototype.click to prevent OS dialog
+    await page.evaluate(() => {
+      // Store original click method
+      const originalClick = HTMLInputElement.prototype.click;
+      
+      // Patch click method
+      HTMLInputElement.prototype.click = function() {
+        // If this is a file input, don't call native click (prevent OS dialog)
+        if (this.type === 'file') {
+          // Just return without calling native click
+          // This allows Gemini to create input but prevents OS dialog
+          return;
+        }
+        // For other input types, call original click
+        return originalClick.call(this);
+      };
+      
+      // Store reference so we can restore later if needed
+      window.__puppeteer_patched_input_click = originalClick;
+    });
+    
+    // Step 2: Click button to trigger Gemini to create input (but no OS dialog will open)
+    // Find and click upload button - CHỈ tìm button có aria-label="Open upload file menu"
+    const buttonFound = await page.evaluate(() => {
+      const btn = document.querySelector('button[aria-label="Open upload file menu"]');
+      if (btn && btn.offsetParent !== null) {
+        btn.click();
         return true;
+      }
+      return false;
+    });
+    
+    if (!buttonFound) {
+      // Fallback: try clickSelectors
+      const clickedPlus = await clickSelectors(page, [
+        'button[aria-label="Open upload file menu"]',
+      ], { timeoutMs: 5000 }).catch(() => false);
+      
+      if (!clickedPlus) {
+        // Restore click method
+        await page.evaluate(() => {
+          if (window.__puppeteer_patched_input_click) {
+            HTMLInputElement.prototype.click = window.__puppeteer_patched_input_click;
+            delete window.__puppeteer_patched_input_click;
+          }
+        });
+        return false;
+      }
+    }
+    
+    // Wait for menu to appear
+    await new Promise((r) => setTimeout(r, 300));
+    
+    // Click "Upload files" menu item
+    const menuItemClicked = await page.evaluate(() => {
+      const menuItems = [
+        'button[data-test-id="local-images-files-uploader-button"]',
+        'button[aria-label="Upload files"]',
+      ];
+      
+      for (const sel of menuItems) {
+        const item = document.querySelector(sel);
+        if (item) {
+          item.click();
+          return { clicked: true, selector: sel };
+        }
+      }
+      return { clicked: false };
+    });
+    
+    if (!menuItemClicked.clicked) {
+      const clickedMenuItem = await clickSelectors(page, [
+        'button[data-test-id="local-images-files-uploader-button"]',
+        'button[aria-label="Upload files"]',
+      ], { timeoutMs: 1500 }).catch(() => {});
+      
+      if (!clickedMenuItem) {
+        // Restore click method
+        await page.evaluate(() => {
+          if (window.__puppeteer_patched_input_click) {
+            HTMLInputElement.prototype.click = window.__puppeteer_patched_input_click;
+            delete window.__puppeteer_patched_input_click;
+          }
+        });
+        return false;
+      }
+    }
+    
+    // Wait for input to be created (Gemini will try to click it, but our patch prevents OS dialog)
+    await new Promise((r) => setTimeout(r, 500));
+    
+    // Step 3: Find the input that Gemini created (should be in DOM now, no OS dialog opened)
+    const fileInputSelectors = [
+      '#cdk-overlay-1 > mat-card > mat-action-list > images-files-uploader > input[type=file]',
+      'div.editor-container.hide-on-mobile-preview input[type="file"]',
+      'div.editor-container-inner input[type="file"]',
+      'div.knowledge-files-content input[type="file"]',
+      'images-files-uploader input[type="file"]',
+      'input[type="file"][name="Filedata"]',
+      'input[type="file"][multiple]',
+      'input[type="file"]'
+    ];
+    
+    let fileInput = null;
+    let foundSelector = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      for (const selector of fileInputSelectors) {
+        try {
+          fileInput = await page.$(selector);
+          if (fileInput) {
+            foundSelector = selector;
+            break;
+          }
+        } catch (e) {
+          // Continue to next selector
+        }
+      }
+      
+      if (fileInput) break;
+      
+      // If not found, wait a bit and try again
+      if (!fileInput) {
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    }
+    
+    if (fileInput) {
+      // Step 4: Use Puppeteer uploadFile() to upload files (no OS dialog because click is patched)
+      try {
+        await fileInput.uploadFile(...existing);
+        
+        // Step 5: Trigger change event to notify Gemini handlers
+        await page.evaluate((sel) => {
+          const input = document.querySelector(sel);
+          if (input) {
+            input.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+        }, foundSelector);
+        
+        // Step 6: Restore original click method
+        await page.evaluate(() => {
+          if (window.__puppeteer_patched_input_click) {
+            HTMLInputElement.prototype.click = window.__puppeteer_patched_input_click;
+            delete window.__puppeteer_patched_input_click;
+          }
+        });
+        
+        // Wait for upload to process
+        await new Promise((r) => setTimeout(r, 2000));
+        return true;
+      } catch (uploadError) {
+        // Restore original click method even on error
+        await page.evaluate(() => {
+          if (window.__puppeteer_patched_input_click) {
+            HTMLInputElement.prototype.click = window.__puppeteer_patched_input_click;
+            delete window.__puppeteer_patched_input_click;
+          }
+        });
+      }
+    } else {
+      // Restore original click method
+      await page.evaluate(() => {
+        if (window.__puppeteer_patched_input_click) {
+          HTMLInputElement.prototype.click = window.__puppeteer_patched_input_click;
+          delete window.__puppeteer_patched_input_click;
+        }
+      });
+    }
+    
+    // Fallback: try to locate hidden input and set files directly (may not always be present)
+    // Restore click method first
+    await page.evaluate(() => {
+      if (window.__puppeteer_patched_input_click) {
+        HTMLInputElement.prototype.click = window.__puppeteer_patched_input_click;
+        delete window.__puppeteer_patched_input_click;
+      }
+    });
+    
+    let input = await page.$([
+      'div.editor-container.hide-on-mobile-preview input[type="file"]',
+      'div.editor-container-inner input[type="file"]',
+      'div.knowledge-files-content input[type="file"]',
+      'input.hidden-local-upload-button',
+      'input[class*="hidden-local-"][type="file"]',
+      'input[type="file"]'
+    ].join(', '));
+    if (!input) {
+      await new Promise((r) => setTimeout(r, 400));
+      input = await page.$('input[type="file"], input.hidden-local-upload-button');
+    }
+    if (input) {
+      try {
+        if (input.uploadFile) {
+          await input.uploadFile(...existing);
+        } else if (page.setInputFiles) {
+          await page.setInputFiles(input, existing);
+        }
+        return true;
+      } catch (e) {
+        // ignore
       }
     }
   } catch (e) {
-    logger.info({ err: e?.message }, 'gemini:plus/filechooser path failed, fallback to hidden input');
-  }
-
-  // 2) Fallback: try to locate hidden input and set files directly (may not always be present)
-  let input = await page.$([
-    'div.editor-container.hide-on-mobile-preview input[type="file"]',
-    'div.editor-container-inner input[type="file"]',
-    'div.knowledge-files-content input[type="file"]',
-    'input.hidden-local-upload-button',
-    'input[class*="hidden-local-"][type="file"]',
-    'input[type="file"]'
-  ].join(', '));
-  if (!input) {
-    await new Promise((r) => setTimeout(r, 400));
-    input = await page.$('input[type="file"], input.hidden-local-upload-button');
-  }
-  if (!input) return false;
-  try {
-    if (input.uploadFile) {
-      await input.uploadFile(...existing);
-    } else if (page.setInputFiles) {
-      await page.setInputFiles(input, existing);
-    }
-    return true;
-  } catch (e) {
-    // Try FileChooser flow
-    try {
-      const chooserPromise = new Promise((resolve) => page.once('filechooser', resolve));
-      const fileChooser = await Promise.race([
-        chooserPromise,
-        new Promise((resolve, reject) => setTimeout(() => reject(new Error('no filechooser')), 3000)),
-      ]);
-      if (fileChooser) {
-        await fileChooser.accept(existing);
-        return true;
+    // Restore original click method on error
+    await page.evaluate(() => {
+      if (window.__puppeteer_patched_input_click) {
+        HTMLInputElement.prototype.click = window.__puppeteer_patched_input_click;
+        delete window.__puppeteer_patched_input_click;
       }
-    } catch (e2) {
-      logger.info({ err: e2?.message }, 'gemini:filechooser failed');
-    }
-    return false;
+    });
   }
+  
+  return false;
 }
 
 async function createGem({ userDataDir, name, description, instructions, knowledgeFiles, debugPort }) {
