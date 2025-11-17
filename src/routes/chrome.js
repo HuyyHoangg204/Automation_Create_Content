@@ -1,7 +1,7 @@
 const express = require('express');
 const { z } = require('zod');
 const { validateBody } = require('../middleware/validators');
-const { createChromeProfile, getChromePathFromEnvOrDefault, launchChromeProfile, listChromeProfiles, getChromeProfileById, stopChromeProfile, ensureGmailLogin } = require('../services/chrome');
+const { createChromeProfile, getChromePathFromEnvOrDefault, launchChromeProfile, listChromeProfiles, getChromeProfileById, stopChromeProfile, ensureGmailLogin, getProfilesBaseDir, setProfilesBaseDir } = require('../services/chrome');
 const { ACCOUNT_GOOGLE } = require('../constants/constants');
 
 const router = express.Router();
@@ -75,6 +75,34 @@ router.post('/profiles/stop', validateBody(launchSchema), async (req, res, next)
 router.get('/chrome-path', (req, res) => {
   const chromePath = getChromePathFromEnvOrDefault();
   res.json({ chromePath });
+});
+
+// API get profiles folder
+router.get('/profiles-folder', async (req, res, next) => {
+  try {
+    const profilesBaseDir = await getProfilesBaseDir();
+    res.json({ profilesBaseDir });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// API set profiles folder
+const setFolderSchema = z.object({
+  folder: z.string().min(1)
+});
+
+router.put('/profiles-folder', validateBody(setFolderSchema), async (req, res, next) => {
+  try {
+    const { folder } = req.validatedBody;
+    const resolvedPath = await setProfilesBaseDir(folder);
+    res.json({ 
+      profilesBaseDir: resolvedPath,
+      message: 'Profiles folder updated successfully'
+    });
+  } catch (err) {
+    return next(err);
+  }
 });
 
 const loginSchema = z.object({

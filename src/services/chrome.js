@@ -1,18 +1,47 @@
 const path = require('path');
 const fs = require('fs-extra');
 const { randomUUID } = require('crypto');
-const { rootDir } = require('../config');
+const { rootDir, defaultProfilesDir } = require('../config');
 const { spawn } = require('child_process');
 const { ensureGmailLoggedIn: ensureGmailLoggedInScript } = require('../scripts/gmailLogin');
+const { CHROME_DEBUG_HOST } = require('../constants/constants');
 let puppeteer;
 try { puppeteer = require('puppeteer-core'); } catch (_) { puppeteer = null; }
+let WebSocket;
+try { WebSocket = require('ws'); } catch (_) { WebSocket = null; }
+
+// Config file để lưu profiles base dir
+const PROFILES_CONFIG_FILE = path.join(rootDir, '.profiles-config.json');
+
+async function getProfilesBaseDir() {
+  try {
+    const config = await fs.readJson(PROFILES_CONFIG_FILE);
+    if (config && config.profilesBaseDir && fs.existsSync(config.profilesBaseDir)) {
+      return config.profilesBaseDir;
+    }
+  } catch (_) {
+    // Config không tồn tại hoặc invalid
+  }
+  // Return default
+  return defaultProfilesDir;
+}
+
+async function setProfilesBaseDir(newDir) {
+  const resolvedPath = path.resolve(newDir);
+  await fs.ensureDir(resolvedPath);
+  await fs.writeJson(PROFILES_CONFIG_FILE, {
+    profilesBaseDir: resolvedPath,
+    updatedAt: new Date().toISOString()
+  }, { spaces: 2 });
+  return resolvedPath;
+}
 
 function sanitizeName(name) {
   return String(name).replace(/[^a-zA-Z0-9-_\.]/g, '_').slice(0, 100) || 'profile';
 }
 
 async function ensureProfilesBaseDir() {
-  const profilesBase = path.join(rootDir, 'profiles');
+  const profilesBase = await getProfilesBaseDir();
   await fs.ensureDir(profilesBase);
   return profilesBase;
 }
@@ -344,6 +373,8 @@ async function ensureGmailLogin({ userDataDir, email, password, debugPort: prefe
 }
 
 module.exports.ensureGmailLogin = ensureGmailLogin;
+module.exports.getProfilesBaseDir = getProfilesBaseDir;
+module.exports.setProfilesBaseDir = setProfilesBaseDir;
 
 
 
