@@ -1,8 +1,30 @@
-const { logger } = require('../logger');
 const { connectToBrowserByUserDataDir } = require('./gmailLogin');
 const { clickByText, clickSelectors, uploadKnowledgeFiles } = require('./gemini');
 const fs = require('fs');
 const path = require('path');
+
+async function typeIntoEditable(page, handle, text) {
+  if (!handle) return false;
+  try {
+    await handle.focus();
+    // Use execCommand for contenteditable; also dispatch input event
+    await handle.evaluate((el, t) => {
+      try {
+        const sel = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        sel.removeAllRanges();
+        sel.addRange(range);
+        document.execCommand('insertText', false, t);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      } catch (e) {
+        el.textContent = t;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    }, text);
+    return true;
+  } catch (_) { return false; }
+}
 
 /**
  * Upload files to chat input area via file chooser
@@ -20,8 +42,6 @@ async function uploadFilesViaFileChooser(page, files) {
   if (!existing.length) return false;
 
   try {
-    logger.info({ fileCount: existing.length }, 'gemini: attempting patch click method (no OS dialog)');
-    
     // Step 1: Patch HTMLInputElement.prototype.click to prevent OS dialog
     await page.evaluate(() => {
       // Store original click method
@@ -43,11 +63,7 @@ async function uploadFilesViaFileChooser(page, files) {
       window.__puppeteer_patched_input_click = originalClick;
     });
     
-    logger.info({}, 'gemini: patched HTMLInputElement.prototype.click to prevent OS dialog');
-    
     // Step 2: Click button to trigger Gemini to create input (but no OS dialog will open)
-    logger.info({}, 'gemini: clicking button to trigger Gemini input creation (no OS dialog)');
-    
     // Find and click upload button
     const buttonFound = await page.evaluate(() => {
       const selectors = [
@@ -67,7 +83,6 @@ async function uploadFilesViaFileChooser(page, files) {
     });
     
     if (!buttonFound) {
-      logger.warn({}, 'gemini: upload button not found');
       return false;
     }
     
@@ -91,16 +106,10 @@ async function uploadFilesViaFileChooser(page, files) {
       return false;
     });
     
-    if (menuItemClicked) {
-      logger.info({}, 'gemini: clicked "Upload files" menu item');
-    }
-    
     // Wait for input to be created (Gemini will try to click it, but our patch prevents OS dialog)
     await new Promise((r) => setTimeout(r, 500));
     
     // Step 3: Find the input that Gemini created (should be in DOM now, no OS dialog opened)
-    logger.info({}, 'gemini: looking for input[type="file"] created by Gemini (no OS dialog)');
-    
     const fileInputSelectors = [
       '#cdk-overlay-1 > mat-card > mat-action-list > images-files-uploader > input[type=file]',
       'input[type="file"][name="Filedata"]',
@@ -117,7 +126,6 @@ async function uploadFilesViaFileChooser(page, files) {
           fileInput = await page.$(selector);
           if (fileInput) {
             foundSelector = selector;
-            logger.info({ selector, attempt: attempt + 1 }, 'gemini: found input[type="file"] created by Gemini');
             break;
           }
         } catch (e) {
@@ -134,12 +142,9 @@ async function uploadFilesViaFileChooser(page, files) {
     }
     
     if (fileInput) {
-      logger.info({ selector: foundSelector }, 'gemini: uploading files to Gemini input using Puppeteer (no OS dialog)');
-      
       // Step 4: Use Puppeteer uploadFile() to upload files (no OS dialog because click is patched)
       try {
         await fileInput.uploadFile(...existing);
-        logger.info({ fileCount: existing.length }, 'gemini: files uploaded to Gemini input via Puppeteer');
         
         // Step 5: Trigger change event to notify Gemini handlers
         await page.evaluate((sel) => {
@@ -149,8 +154,6 @@ async function uploadFilesViaFileChooser(page, files) {
             input.dispatchEvent(new Event('input', { bubbles: true }));
           }
         }, foundSelector);
-        
-        logger.info({}, 'gemini: triggered change events on input');
         
         // Step 6: Restore original click method (optional, but good practice)
         await page.evaluate(() => {
@@ -164,7 +167,6 @@ async function uploadFilesViaFileChooser(page, files) {
         await new Promise((r) => setTimeout(r, 2000));
         return true;
       } catch (uploadError) {
-        logger.error({ err: uploadError?.message }, 'gemini: Puppeteer uploadFile failed');
         // Restore original click method even on error
         await page.evaluate(() => {
           if (window.__puppeteer_patched_input_click) {
@@ -174,7 +176,6 @@ async function uploadFilesViaFileChooser(page, files) {
         });
       }
     } else {
-      logger.warn({}, 'gemini: input not found after clicking, restoring click method');
       // Restore original click method
       await page.evaluate(() => {
         if (window.__puppeteer_patched_input_click) {
@@ -185,8 +186,6 @@ async function uploadFilesViaFileChooser(page, files) {
     }
     
     // Fallback to original method if patch method failed
-    logger.info({}, 'gemini: patch method failed, trying fallback');
-    
     // Method: Create fake input, upload files, then trigger Gemini's upload logic
     const uploadResult = await page.evaluate(async (filePaths) => {
       // Step 1: Create a fake input element
@@ -228,10 +227,8 @@ async function uploadFilesViaFileChooser(page, files) {
       };
     }, existing);
     
-    logger.info({ uploadResult }, 'gemini: fake input created, finding Gemini handler');
-    
     if (!uploadResult.handlerFound) {
-      logger.warn({}, 'gemini: Gemini upload handler not found, trying alternative method');
+      // Handler not found, continue with alternative method
     }
     
     // Step 3: Upload files to fake input using Puppeteer (no OS dialog)
@@ -240,14 +237,10 @@ async function uploadFilesViaFileChooser(page, files) {
       throw new Error('Fake input not found');
     }
     
-    logger.info({}, 'gemini: uploading files to fake input (no OS dialog)');
     await fakeInputHandle.uploadFile(...existing);
-    logger.info({ fileCount: existing.length }, 'gemini: files uploaded to fake input');
     
     // Step 4: Transfer files from fake input to Gemini's logic
     // First, try to trigger Gemini's input to appear by clicking button
-    logger.info({}, 'gemini: clicking button to trigger Gemini input appearance');
-    
     // Click button to open menu and trigger input creation
     const buttonClicked = await page.evaluate(() => {
       const selectors = [
@@ -446,22 +439,15 @@ async function uploadFilesViaFileChooser(page, files) {
       return { success: false, error: 'No method found to transfer files - no input, no component, no dropzone' };
     }, uploadResult.fakeInputId, uploadResult.handlerType);
     
-    logger.info({ transferResult }, 'gemini: file transfer result');
-    
     // Special case: If we found Gemini input, use Puppeteer uploadFile on it (with file chooser interception)
     if (transferResult.method === 'needs-puppeteer-upload' && transferResult.inputFound) {
-      logger.info({}, 'gemini: found Gemini input, using Puppeteer uploadFile with file chooser interception');
-      
       // Set up file chooser listener BEFORE calling uploadFile
       const fileChooserPromise = new Promise((resolve) => {
         page.once('filechooser', async (fileChooser) => {
-          logger.info({}, 'gemini: file chooser intercepted, accepting files');
           try {
             await fileChooser.accept(existing);
-            logger.info({ fileCount: existing.length }, 'gemini: files accepted in file chooser');
             resolve(true);
           } catch (err) {
-            logger.warn({ err: err?.message }, 'gemini: file chooser accept failed');
             resolve(false);
           }
         });
@@ -481,7 +467,6 @@ async function uploadFilesViaFileChooser(page, files) {
         try {
           geminiInputHandle = await page.$(sel);
           if (geminiInputHandle) {
-            logger.info({ selector: sel }, 'gemini: found Gemini input, uploading files');
             break;
           }
         } catch (e) {
@@ -502,7 +487,6 @@ async function uploadFilesViaFileChooser(page, files) {
           ]);
           
           if (result) {
-            logger.info({ fileCount: existing.length }, 'gemini: files uploaded to Gemini input (file chooser intercepted)');
             // Clean up fake input
             await page.evaluate((fakeInputId) => {
               const fakeInput = document.getElementById(fakeInputId);
@@ -514,13 +498,12 @@ async function uploadFilesViaFileChooser(page, files) {
             return true;
           }
         } catch (uploadError) {
-          logger.warn({ err: uploadError?.message }, 'gemini: Puppeteer uploadFile failed');
+          // Continue
         }
       }
     }
     
     if (transferResult.success) {
-      logger.info({ method: transferResult.method, fileCount: transferResult.fileCount }, 'gemini: files transferred to Gemini successfully (no OS dialog)');
       // Clean up fake input
       await page.evaluate((fakeInputId) => {
         const fakeInput = document.getElementById(fakeInputId);
@@ -532,17 +515,11 @@ async function uploadFilesViaFileChooser(page, files) {
       return true;
     }
     
-    logger.warn({ error: transferResult.error }, 'gemini: file transfer failed, trying fallback');
-    
     // Fallback: Click button to open menu (original method)
-    logger.info({}, 'gemini: falling back to button click method');
-    
     // Register filechooser BEFORE clicking (as fallback)
     const chooserPromiseFallback = new Promise((resolve) => {
       page.once('filechooser', resolve);
     });
-    
-    logger.info({}, 'gemini: looking for upload button in chat input area (fallback)');
     
     // Try to find button in page.evaluate first
     const buttonFoundFallback = await page.evaluate(() => {
@@ -595,11 +572,8 @@ async function uploadFilesViaFileChooser(page, files) {
     });
     
     if (!buttonFoundFallback.found) {
-      logger.warn({}, 'gemini: upload button not found in chat input area (fallback)');
       return false;
     }
-    
-    logger.info({ selector: buttonFoundFallback.selector, text: buttonFoundFallback.text }, 'gemini: found upload button (fallback)');
     
     // Click the button - if selector is generic, use page.evaluate to click directly
     let clickedFallback = false;
@@ -633,7 +607,6 @@ async function uploadFilesViaFileChooser(page, files) {
     }
     
     if (!clickedFallback) {
-      logger.warn({}, 'gemini: failed to click upload button (fallback)');
       return false;
     }
     
@@ -649,17 +622,11 @@ async function uploadFilesViaFileChooser(page, files) {
       'div[role="menuitem"]',
     ], { timeoutMs: 1000 }).catch(() => false);
     
-    if (uploadMenuItemClickedFallback) {
-      logger.info({}, 'gemini: clicked "Upload files" menu item (fallback)');
-    }
-    
     // Step 2: After clicking "Upload files", input should appear in DOM
     // Wait a bit for input to be created
     await new Promise((r) => setTimeout(r, 300));
     
     // Step 3: Try to find the input that was just created (NO OS chooser)
-    logger.info({}, 'gemini: looking for input[type="file"] created after clicking Upload files (fallback)');
-    
     const fileInputSelectorsFallback = [
       '#cdk-overlay-1 > mat-card > mat-action-list > images-files-uploader > input[type=file]',
       'input[type="file"][name="Filedata"]',
@@ -675,11 +642,8 @@ async function uploadFilesViaFileChooser(page, files) {
         try {
           fileInputFallback = await page.$(selector);
           if (fileInputFallback) {
-            logger.info({ selector }, 'gemini: found input[type="file"], uploading directly (fallback)');
-            
             // Use Puppeteer's uploadFile - this does NOT open OS chooser
             await fileInputFallback.uploadFile(...existing);
-            logger.info({ fileCount: existing.length }, 'gemini: files uploaded directly to input (fallback)');
             
             // Wait a bit for upload to process
             await new Promise((r) => setTimeout(r, 1000));
@@ -687,7 +651,6 @@ async function uploadFilesViaFileChooser(page, files) {
           }
         } catch (e) {
           // Continue to next selector
-          logger.debug({ selector, err: e.message }, 'gemini: selector failed, trying next (fallback)');
         }
       }
       
@@ -698,26 +661,22 @@ async function uploadFilesViaFileChooser(page, files) {
     }
     
     // Step 4: Fallback - if input not found, use file chooser
-    logger.warn({}, 'gemini: input not found after clicking, falling back to file chooser');
     const fileChooserFallback = await Promise.race([
       chooserPromiseFallback,
       new Promise((resolve, reject) => 
         setTimeout(() => reject(new Error('filechooser timeout')), 2000)
       ),
-    ]).catch((e) => {
-      logger.warn({ err: e.message }, 'gemini: file chooser did not appear (fallback)');
+    ]).catch(() => {
       return null;
     });
     
     if (fileChooserFallback) {
-      logger.info({ fileCount: existing.length }, 'gemini: accepting files in file chooser (fallback)');
       await fileChooserFallback.accept(existing);
       return true;
     }
     
     return false;
   } catch (e) {
-    logger.error({ err: e?.message, stack: e?.stack }, 'gemini: error in uploadFilesViaFileChooser');
     return false;
   }
 }
@@ -840,8 +799,6 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt }) {
     
     // Step 2: Upload files if provided (using direct file assignment method)
     if (listFile && listFile.length > 0) {
-      logger.info({ fileCount: listFile.length }, 'gemini: uploading files');
-      
       const filesExist = listFile.filter((p) => {
         try {
           return fs.existsSync(p);
@@ -859,91 +816,77 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt }) {
           await new Promise((r) => setTimeout(r, 500));
           
           // Upload files via file chooser (click button to trigger file chooser)
-          logger.info({}, 'gemini: uploading files via file chooser');
           const uploaded = await uploadFilesViaFileChooser(page, filesExist);
           if (uploaded) {
-            logger.info({}, 'gemini: files uploaded via file chooser');
             await new Promise((r) => setTimeout(r, 2000));
           } else {
             // Fallback: try uploadKnowledgeFiles (for Knowledge section)
-            logger.info({}, 'gemini: file chooser upload failed, trying uploadKnowledgeFiles fallback');
             const uploaded2 = await uploadKnowledgeFiles(page, filesExist);
             if (uploaded2) {
-              logger.info({}, 'gemini: files uploaded via uploadKnowledgeFiles');
               await new Promise((r) => setTimeout(r, 2000));
-            } else {
-              logger.warn({}, 'gemini: all upload methods failed');
             }
           }
         } catch (e) {
-          logger.error({ err: e?.message, stack: e?.stack }, 'gemini: error uploading files');
           // Fallback to uploadKnowledgeFiles
           try {
             const uploaded = await uploadKnowledgeFiles(page, filesExist);
             if (uploaded) {
-              logger.info({}, 'gemini: files uploaded via fallback method');
               await new Promise((r) => setTimeout(r, 2000));
             }
           } catch (e2) {
-            logger.error({ err: e2?.message }, 'gemini: fallback upload also failed');
+            // Ignore
           }
         }
-      } else {
-        logger.warn({}, 'gemini: no valid files found to upload');
       }
     }
 
-    // Step 3: Find prompt textarea and enter prompt
+    // Step 3: Find prompt textarea/rich-textarea and enter prompt
     if (prompt) {
-      logger.info({ promptLength: prompt.length }, 'gemini: entering prompt');
-      
-      const promptEntered = await page.evaluate((promptText) => {
-        // Try multiple selectors for the prompt input
-        const selectors = [
-          'textarea[aria-label*="prompt" i]',
-          'textarea[aria-label*="query" i]',
-          'textarea[placeholder*="prompt" i]',
-          'textarea[placeholder*="Enter" i]',
-          'textarea[placeholder*="Type" i]',
-          'textarea.query-box-input',
-          'textarea[formcontrolname="discoverSourcesQuery"]',
-          'textarea',
-        ];
-        
-        for (const sel of selectors) {
-          const textarea = document.querySelector(sel);
-          if (textarea) {
-            try {
-              textarea.focus();
-              textarea.value = promptText;
-              textarea.dispatchEvent(new Event('input', { bubbles: true }));
-              textarea.dispatchEvent(new Event('change', { bubbles: true }));
-              return true;
-            } catch (e) {
-              // Continue to next selector
-            }
+      // First, try to find rich-textarea element (Angular component)
+      let promptField = null;
+      const richTextarea = await page.$('rich-textarea');
+      if (richTextarea) {
+        // Find the contenteditable div inside rich-textarea (usually .ql-editor)
+        promptField = await richTextarea.$('.ql-editor, [contenteditable="true"], div[role="textbox"]');
+        if (promptField) {
+          const entered = await typeIntoEditable(page, promptField, prompt);
+          if (!entered) {
+            promptField = null; // Try fallback
           }
         }
-        
-        return false;
-      }, prompt);
-
-      if (!promptEntered) {
-        // Fallback: try using Puppeteer's type method
-        const textarea = await page.$('textarea[aria-label*="prompt" i], textarea[aria-label*="query" i], textarea[placeholder*="Enter" i], textarea.query-box-input, textarea');
-        if (textarea) {
-          await textarea.focus();
-          await textarea.click({ clickCount: 3 });
-          await textarea.type(prompt, { delay: 10 });
-        } else {
-          status = 'prompt_field_not_found';
-          return { status, error: 'Prompt textarea not found' };
-        }
       }
-
-      // Step 4: Submit the prompt (click send button or press Enter)
-      logger.info({}, 'gemini: submitting prompt');
       
+
+      // Step 4: Set up CDP to intercept StreamGenerate request before submitting
+      let responseFinishedPromise = null;
+      let cdpSession = null;
+      
+      responseFinishedPromise = new Promise((resolve) => {
+        const client = page._client();
+        cdpSession = client;
+        
+        // Enable Network domain
+        client.send('Network.enable').catch(() => {});
+        
+        let targetRequestId = null;
+        
+        // Track the StreamGenerate request
+        client.on('Network.responseReceived', (event) => {
+          const { response } = event;
+          if (response.url.includes('StreamGenerate') && response.status === 200) {
+            targetRequestId = event.requestId;
+          }
+        });
+        
+        // Wait for loading finished (indicates response is complete)
+        client.on('Network.loadingFinished', (event) => {
+          if (event.requestId === targetRequestId && targetRequestId) {
+            resolve(true);
+          }
+        });
+      });
+      
+      // Step 5: Submit the prompt (click send button or press Enter)
       const submitted = await page.evaluate(() => {
         // Try to find send button
         const sendButtons = [
@@ -974,12 +917,94 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt }) {
         await page.keyboard.press('Enter');
         await new Promise((r) => setTimeout(r, 500));
       }
+
+      // Step 6: Wait for StreamGenerate response to finish, then scroll and click copy-button
+      if (responseFinishedPromise) {
+        try {
+          // Wait for Network.loadingFinished event (indicates response is complete)
+          // No timeout - wait until response actually finishes
+          await responseFinishedPromise;
+          
+          // Clean up CDP
+          if (cdpSession) {
+            try {
+              await cdpSession.send('Network.disable').catch(() => {});
+            } catch (e) {
+              // Ignore cleanup errors
+            }
+          }
+          
+          // Wait a bit more for response to fully render in DOM
+          await new Promise((r) => setTimeout(r, 2000));
+          
+          // Find and click copy-button directly (it should be in DOM already)
+          let copyButton = await page.$('copy-button');
+          if (copyButton) {
+            try {
+              // Try to find the actual button element inside copy-button
+              let innerButton = await copyButton.$('button');
+              if (!innerButton) {
+                innerButton = await copyButton.$('[role="button"]');
+              }
+              if (!innerButton) {
+                innerButton = copyButton;
+              }
+              
+              if (innerButton) {
+                await innerButton.evaluate((el) => el.scrollIntoView({ block: 'center', behavior: 'smooth' }));
+                await new Promise((r) => setTimeout(r, 300));
+                await innerButton.focus();
+                await innerButton.click({ timeout: 2000 });
+                await new Promise((r) => setTimeout(r, 1000));
+              } else {
+                // Fallback: click copy-button directly
+                await copyButton.evaluate((el) => el.scrollIntoView({ block: 'center', behavior: 'smooth' }));
+                await new Promise((r) => setTimeout(r, 300));
+                await copyButton.focus();
+                await copyButton.click({ timeout: 2000 });
+                await new Promise((r) => setTimeout(r, 1000));
+              }
+            } catch (clickErr) {
+              // Fallback: try clicking using evaluate
+              const clicked = await page.evaluate(() => {
+                const copyButton = document.querySelector('copy-button');
+                if (copyButton) {
+                  const innerButton = copyButton.querySelector('button') || 
+                                     copyButton.querySelector('[role="button"]') ||
+                                     copyButton;
+                  try {
+                    innerButton.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                    innerButton.focus();
+                    innerButton.click();
+                    return true;
+                  } catch (e) {
+                    return false;
+                  }
+                }
+                return false;
+              });
+              
+              if (clicked) {
+                await new Promise((r) => setTimeout(r, 1000));
+              }
+            }
+          }
+        } catch (e) {
+          // Clean up on error
+          if (cdpSession) {
+            try {
+              await cdpSession.send('Network.disable').catch(() => {});
+            } catch (cleanupErr) {
+              // Ignore cleanup errors
+            }
+          }
+        }
+      }
     }
 
     status = 'success';
     return { status };
   } catch (e) {
-    logger.error({ err: e, stack: e?.stack }, 'gemini: error sending prompt');
     return { status: 'failed', error: e?.message || String(e) };
   } finally {
     try { browser.disconnect(); } catch (_) {}
@@ -987,5 +1012,6 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt }) {
 }
 
 module.exports = { sendPrompt };
+
 
 
