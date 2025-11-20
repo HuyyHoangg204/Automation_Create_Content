@@ -1,32 +1,51 @@
 {
   "name": "automation_create_content",
   "version": "1.0.0",
-  "description": "",
-  "main": "src/index.js",
+  "description": "Automation Content Creation App with Electron UI",
+  "type": "module",
+  "main": "dist-electron/main.js",
   "scripts": {
-    "dev": "nodemon src/index.js",
-    "start": "node src/index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "vite",
+    "build": "vite build && electron-builder",
+    "preview": "vite preview",
+    "start:backend": "node src/index.js",
+    "start:dev": "nodemon src/index.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@kalimahapps/vue-icons": "^1.9.5",
+    "@primeuix/themes": "^1.2.5",
+    "@tailwindcss/vite": "^4.1.16",
     "clipboardy": "^5.0.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "fs-extra": "^11.3.2",
     "multer": "^2.0.2",
+    "primeicons": "^7.0.0",
+    "primevue": "^4.4.1",
     "pino": "^10.1.0",
     "pino-http": "^11.0.0",
     "pino-pretty": "^13.1.2",
     "puppeteer-core": "^24.29.0",
+    "socket.io-client": "^4.8.1",
     "swagger-ui-express": "^5.0.1",
+    "tailwindcss": "^4.1.16",
     "uuid": "^13.0.0",
+    "vue": "^3.4.21",
+    "vue-router": "^4.6.3",
+    "vuex": "^4.1.0",
     "zod": "^4.1.12"
   },
   "devDependencies": {
-    "nodemon": "^3.1.10"
+    "@vitejs/plugin-vue": "^5.0.4",
+    "electron": "^30.0.1",
+    "electron-builder": "^24.13.3",
+    "nodemon": "^3.1.10",
+    "vite": "^5.1.6",
+    "vite-plugin-electron": "^0.28.6",
+    "vite-plugin-electron-renderer": "^0.14.5"
   }
 }

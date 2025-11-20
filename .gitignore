@@ -5,4 +5,14 @@ npm-debug.log*
 profiles/
 train/
 
+# Electron build outputs
+dist/
+dist-electron/
+release/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
 

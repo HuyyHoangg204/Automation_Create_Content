@@ -4,7 +4,10 @@ const dotenv = require('dotenv');
 
 dotenv.config();
 
-const rootDir = process.cwd();
+// Get root directory - use __dirname if available (CommonJS), otherwise process.cwd()
+const rootDir = typeof __dirname !== 'undefined' 
+  ? __dirname.replace(/[\\/]src$/, '') // Remove /src if present
+  : process.cwd();
 
 // Default profiles folder - dùng folder mà các app khác hay dùng
 function getDefaultProfilesDir() {
