@@ -16,7 +16,7 @@ const geminiRouter = require('./routes/gemini');
 // Error middleware
 const { notFoundHandler, errorHandler } = require('./middleware/errorHandler');
 
-async function bootstrap() {
+async function createApp() {
   await fs.ensureDir(uploadDir);
 
   const app = express();
@@ -37,15 +37,23 @@ async function bootstrap() {
   app.use(notFoundHandler);
   app.use(errorHandler);
 
-  app.listen(port, () => {
-    logger.info({ port }, 'Server started');
-  });
+  return app;
 }
 
-bootstrap().catch((err) => {
-  // eslint-disable-next-line no-console
-  console.error(err);
-  process.exit(1);
-});
+// Export app để dùng trong Electron
+module.exports = { createApp };
+
+// Nếu chạy trực tiếp (không phải Electron), start server như cũ
+if (require.main === module) {
+  createApp().then((app) => {
+    app.listen(port, () => {
+      logger.info({ port }, 'Server started');
+    });
+  }).catch((err) => {
+    // eslint-disable-next-line no-console
+    console.error(err);
+    process.exit(1);
+  });
+}
 
 
