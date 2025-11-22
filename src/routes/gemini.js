@@ -1,9 +1,11 @@
 const express = require('express');
 const { z } = require('zod');
-const { listChromeProfiles } = require('../services/chrome');
+const { logger } = require('../logger');
+const { resolveUserDataDir } = require('../utils/resolveUserDataDir');
 const { createGem } = require('../scripts/gemini');
 const { listGems } = require('../scripts/listGems');
 const { sendPrompt } = require('../scripts/sendPrompt');
+const logService = require('../services/logService');
 
 const router = express.Router();
 
@@ -21,23 +23,59 @@ const bodySchema = z.object({
   path: ['name'],
 });
 
+// Trong POST /gemini/gems
 router.post('/gems', async (req, res, next) => {
   try {
     const parsed = bodySchema.safeParse(req.body || {});
     if (!parsed.success) return res.status(400).json({ error: 'ValidationError', details: parsed.error.issues });
-    const { name, userDataDir: dir, profileDirName, gemName, description, instructions, knowledgeFiles, debugPort } = parsed.data;
+    
+    const { name, userDataDir: inputUserDataDir, profileDirName, gemName, description, instructions, knowledgeFiles, debugPort } = parsed.data;
+    
+    // Extract entity info
+    const entityID = req.headers['x-entity-id'] || req.body.entity_id || 'unknown';
+    const userID = req.headers['x-user-id'] || req.body.user_id || 'unknown';
+    
+    // Auto-resolve userDataDir từ tên folder (hỗ trợ các máy khác nhau với user khác nhau)
+    logger.info({
+      inputUserDataDir,
+      name
+    }, '[Gemini] Resolving userDataDir from folder name');
+    
+    const userDataDir = await resolveUserDataDir({
+      userDataDir: inputUserDataDir,
+      name
+    });
+    
+    logger.info({
+      inputUserDataDir,
+      resolvedUserDataDir: userDataDir
+    }, '[Gemini] userDataDir resolved successfully');
 
-    let userDataDir = dir;
-    if (!userDataDir) {
-      const profiles = await listChromeProfiles();
-      const p = profiles.find((it) => it.name === name || it.dirName === name);
-      if (!p) return res.status(404).json({ error: 'NotFound', message: 'Profile not found' });
-      userDataDir = p.userDataDir;
-    }
+    // Log: Gem creating
+    await logService.logInfo('topic', entityID, userID, 'gem_creating',
+      `Creating Gem: ${gemName || name}`, {
+        gemName: gemName || name,
+        description,
+        knowledgeFilesCount: knowledgeFiles?.length || 0
+      });
 
     const out = await createGem({ userDataDir, name: gemName, description, instructions, knowledgeFiles, debugPort });
+    
+    // Log: Gem created
+    await logService.logSuccess('topic', entityID, userID, 'gem_created',
+      'Gem created successfully on Gemini', {
+        gemId: out.id || out.gem_id || 'unknown',
+        gemName: out.name || gemName
+      });
+    
     return res.json(out);
   } catch (err) {
+    // Log error
+    const entityID = req.headers['x-entity-id'] || req.body.entity_id || 'unknown';
+    const userID = req.headers['x-user-id'] || req.body.user_id || 'unknown';
+    await logService.logError('topic', entityID, userID, 'gem_creating',
+      `Failed to create Gem: ${err.message}`, { error: err.message });
+    
     return next(err);
   }
 });
@@ -56,15 +94,13 @@ router.post('/gems/sync', async (req, res, next) => {
   try {
     const parsed = syncSchema.safeParse(req.body || {});
     if (!parsed.success) return res.status(400).json({ error: 'ValidationError', details: parsed.error.issues });
-    const { name, userDataDir: dir, debugPort } = parsed.data;
+    const { name, userDataDir: inputUserDataDir, debugPort } = parsed.data;
 
-    let userDataDir = dir;
-    if (!userDataDir) {
-      const profiles = await listChromeProfiles();
-      const p = profiles.find((it) => it.name === name || it.dirName === name);
-      if (!p) return res.status(404).json({ error: 'NotFound', message: 'Profile not found' });
-      userDataDir = p.userDataDir;
-    }
+    // Auto-resolve userDataDir từ tên folder
+    const userDataDir = await resolveUserDataDir({
+      userDataDir: inputUserDataDir,
+      name
+    });
 
     const out = await listGems({ userDataDir, debugPort });
     return res.json(out);
@@ -90,15 +126,13 @@ router.post('/gems/send-prompt', async (req, res, next) => {
   try {
     const parsed = sendPromptSchema.safeParse(req.body || {});
     if (!parsed.success) return res.status(400).json({ error: 'ValidationError', details: parsed.error.issues });
-    const { name, userDataDir: dir, debugPort, gem, listFile, prompt } = parsed.data;
+    const { name, userDataDir: inputUserDataDir, debugPort, gem, listFile, prompt } = parsed.data;
 
-    let userDataDir = dir;
-    if (!userDataDir) {
-      const profiles = await listChromeProfiles();
-      const p = profiles.find((it) => it.name === name || it.dirName === name);
-      if (!p) return res.status(404).json({ error: 'NotFound', message: 'Profile not found' });
-      userDataDir = p.userDataDir;
-    }
+    // Auto-resolve userDataDir từ tên folder
+    const userDataDir = await resolveUserDataDir({
+      userDataDir: inputUserDataDir,
+      name
+    });
 
     const out = await sendPrompt({ userDataDir, debugPort, gem, listFile, prompt });
     return res.json(out);

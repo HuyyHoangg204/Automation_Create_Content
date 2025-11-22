@@ -6,8 +6,12 @@ import fs from 'node:fs'
 import os from 'node:os'
 import { randomUUID } from 'node:crypto'
 
+// Phải định nghĩa require trước khi sử dụng
 const require = createRequire(import.meta.url)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
+// Load logService sau khi createRequire đã được định nghĩa
+const logService = require('../src/services/logService');
 
 process.env.APP_ROOT = path.join(__dirname, '..')
 
@@ -17,11 +21,17 @@ export const RENDERER_DIST = path.join(process.env.APP_ROOT, 'dist')
 
 process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, 'public') : RENDERER_DIST
 
+// Backend API Configuration
+const BACKEND_API_URL = process.env.BACKEND_API_URL || 'http://localhost:8080'
+const BACKEND_API_KEY = process.env.BACKEND_API_KEY || ''
+
 let win = null
 let apiServer = null
 let tunnelProcess = null
 let tunnelUrl = null
 let tunnelConnected = false
+let currentMachineId = null
+let heartbeatInterval = null
 
 // Start Express API Server
 async function startAPIServer() {
@@ -267,6 +277,7 @@ async function startTunnel() {
     
     // 1. Get machine ID
     const machineId = await getOrCreateMachineId()
+    currentMachineId = machineId
     
     // 2. Get API port
     const backendRequire = createRequire(import.meta.url)
@@ -336,8 +347,17 @@ async function startTunnel() {
             }
           }
           
-          // TODO: Gửi URL về Backend Cloud để register machine
-          // registerMachineWithBackend(machineId, tunnelUrl)
+          // Register machine with backend và update tunnel URL (async, không await)
+          if (tunnelUrl && currentMachineId) {
+            // Register machine first
+            registerMachineWithBackend(currentMachineId, os.hostname()).catch(err => {
+              console.error('Failed to register machine:', err)
+            })
+            // Update tunnel URL
+            updateTunnelUrlToBackend(currentMachineId, tunnelUrl).catch(err => {
+              console.error('Failed to update tunnel URL:', err)
+            })
+          }
         }
         
         // Check for errors
@@ -385,6 +405,112 @@ async function startTunnel() {
     })
   } catch (error) {
     // Failed to start tunnel
+  }
+}
+
+// Register machine with backend
+async function registerMachineWithBackend(machineId, machineName) {
+  try {
+    const response = await fetch(`${BACKEND_API_URL}/api/v1/machines/register`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(BACKEND_API_KEY && { 'X-API-Key': BACKEND_API_KEY })
+      },
+      body: JSON.stringify({
+        machine_id: machineId,
+        name: machineName || os.hostname() || 'My Computer'
+      })
+    })
+    
+    if (!response.ok) {
+      const error = await response.json()
+      // If machine already exists, that's OK
+      if (response.status === 409 || response.status === 200) {
+        return error.box_id || (await response.json()).box_id
+      }
+      throw new Error(error.error || 'Failed to register machine')
+    }
+    
+    const data = await response.json()
+    return data.box_id
+  } catch (error) {
+    console.error('Failed to register machine:', error)
+    return null
+  }
+}
+
+// Get FRP config from backend
+async function getFrpConfigFromBackend(machineId) {
+  try {
+    const response = await fetch(`${BACKEND_API_URL}/api/v1/machines/${machineId}/frp-config`, {
+      method: 'GET',
+      headers: {
+        ...(BACKEND_API_KEY && { 'X-API-Key': BACKEND_API_KEY })
+      }
+    })
+    
+    if (!response.ok) {
+      throw new Error('Failed to get FRP config')
+    }
+    
+    return await response.json()
+  } catch (error) {
+    console.error('Failed to get FRP config:', error)
+    return null
+  }
+}
+
+// Update tunnel URL to backend
+async function updateTunnelUrlToBackend(machineId, tunnelUrl) {
+  try {
+    const response = await fetch(`${BACKEND_API_URL}/api/v1/machines/${machineId}/tunnel-url`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(BACKEND_API_KEY && { 'X-API-Key': BACKEND_API_KEY })
+      },
+      body: JSON.stringify({
+        tunnel_url: tunnelUrl
+      })
+    })
+    
+    if (!response.ok) {
+      throw new Error('Failed to update tunnel URL')
+    }
+    
+    return await response.json()
+  } catch (error) {
+    console.error('Failed to update tunnel URL:', error)
+    return null
+  }
+}
+
+// Send heartbeat to backend
+async function sendHeartbeatToBackend(machineId, tunnelUrl, tunnelConnected, apiRunning, apiPort) {
+  try {
+    const response = await fetch(`${BACKEND_API_URL}/api/v1/machines/${machineId}/heartbeat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(BACKEND_API_KEY && { 'X-API-Key': BACKEND_API_KEY })
+      },
+      body: JSON.stringify({
+        tunnel_url: tunnelUrl || '',
+        tunnel_connected: tunnelConnected,
+        api_running: apiRunning,
+        api_port: apiPort
+      })
+    })
+    
+    if (!response.ok) {
+      throw new Error('Failed to send heartbeat')
+    }
+    
+    return await response.json()
+  } catch (error) {
+    console.error('Failed to send heartbeat:', error)
+    return null
   }
 }
 
@@ -460,6 +586,13 @@ function writePromptsFile(prompts) {
   }
 }
 
+// Sau khi có machine ID (trong startTunnel hoặc getOrCreateMachineId)
+async function initializeLogService() {
+  const machineId = await getOrCreateMachineId();
+  logService.setMachineId(machineId);
+  await logService.initialize();
+}
+
 // IPC Handlers for prompts
 ipcMain.handle('prompts:get', async () => {
   return readPromptsFile()
@@ -523,12 +656,31 @@ app.on('activate', () => {
 app.whenReady().then(async () => {
   // 1. Start API Server first
   await startAPIServer()
+  await initializeLogService();
   
   // 2. Start Tunnel Client
   startTunnel()
   
   // 3. Create Window
   createWindow()
+  
+  // 4. Start heartbeat interval (gửi mỗi 30 giây)
+  const backendRequire = createRequire(import.meta.url)
+  const projectRoot = path.join(__dirname, '..')
+  const config = backendRequire(path.join(projectRoot, 'src', 'config.js'))
+  const apiPort = config.port || 3000
+  
+  heartbeatInterval = setInterval(async () => {
+    if (currentMachineId) {
+      await sendHeartbeatToBackend(
+        currentMachineId,
+        tunnelUrl || '',
+        tunnelConnected,
+        !!apiServer,
+        apiPort
+      )
+    }
+  }, 30000) // 30 seconds
   
   // Register keyboard shortcuts for DevTools
   // F12 or Ctrl+Shift+I to toggle DevTools
@@ -556,6 +708,12 @@ app.whenReady().then(async () => {
 // Cleanup on quit
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
+  
+  // Clear heartbeat interval
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval)
+    heartbeatInterval = null
+  }
   
   // Close API server
   if (apiServer) {

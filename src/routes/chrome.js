@@ -1,8 +1,12 @@
 const express = require('express');
 const { z } = require('zod');
+const { logger } = require('../logger');
 const { validateBody } = require('../middleware/validators');
 const { createChromeProfile, getChromePathFromEnvOrDefault, launchChromeProfile, listChromeProfiles, getChromeProfileById, stopChromeProfile, ensureGmailLogin, getProfilesBaseDir, setProfilesBaseDir } = require('../services/chrome');
+const { resolveUserDataDir } = require('../utils/resolveUserDataDir');
 const { ACCOUNT_GOOGLE } = require('../constants/constants');
+
+const logService = require('../services/logService');
 
 const router = express.Router();
 
@@ -54,11 +58,74 @@ const launchSchema = z.object({
   path: ['name'],
 });
 
+// Trong POST /chrome/profiles/launch
 router.post('/profiles/launch', validateBody(launchSchema), async (req, res, next) => {
   try {
-    const result = await launchChromeProfile(req.validatedBody);
+    // Log request body để debug
+    logger.info({
+      body: req.body,
+      validatedBody: req.validatedBody,
+      headers: {
+        'x-entity-id': req.headers['x-entity-id'],
+        'x-user-id': req.headers['x-user-id']
+      }
+    }, '[Chrome] POST /chrome/profiles/launch - Request received');
+    
+    const { name, userDataDir: inputUserDataDir, profileDirName } = req.validatedBody;
+    
+    // Auto-resolve userDataDir từ tên folder (hỗ trợ các máy khác nhau với user khác nhau)
+    logger.info({
+      inputUserDataDir,
+      name
+    }, '[Chrome] Resolving userDataDir from folder name');
+    
+    const resolvedUserDataDir = await resolveUserDataDir({
+      userDataDir: inputUserDataDir,
+      name
+    });
+    
+    logger.info({
+      inputUserDataDir,
+      resolvedUserDataDir
+    }, '[Chrome] userDataDir resolved successfully');
+    
+    // Extract entity info từ request (có thể từ headers hoặc body)
+    const entityID = req.headers['x-entity-id'] || req.body.entity_id || 'unknown';
+    const userID = req.headers['x-user-id'] || req.body.user_id || 'unknown';
+    
+    // Log: Chrome launching
+    await logService.logInfo('topic', entityID, userID, 'chrome_launching', 
+      `Launching Chrome for profile: ${name || resolvedUserDataDir}`, {
+        name,
+        inputUserDataDir,
+        resolvedUserDataDir,
+        profileDirName
+      });
+    
+    // Update validatedBody với resolved path
+    const launchParams = {
+      ...req.validatedBody,
+      userDataDir: resolvedUserDataDir
+    };
+    
+    const result = await launchChromeProfile(launchParams);
+    
+    // Log: Chrome launched
+    await logService.logSuccess('topic', entityID, userID, 'chrome_launched',
+      'Chrome launched successfully', {
+        pid: result.pid,
+        debugPort: result.launchArgs?.find(a => a.includes('--remote-debugging-port'))?.split('=')[1],
+        gmailStatus: result.gmailCheckStatus
+      });
+    
     return res.status(201).json({ launched: true, ...result });
   } catch (err) {
+    // Log error
+    const entityID = req.headers['x-entity-id'] || req.body.entity_id || 'unknown';
+    const userID = req.headers['x-user-id'] || req.body.user_id || 'unknown';
+    await logService.logError('topic', entityID, userID, 'chrome_launching',
+      `Failed to launch Chrome: ${err.message}`, { error: err.message });
+    
     return next(err);
   }
 });
