@@ -375,6 +375,7 @@ async function ensureGmailLogin({ userDataDir, email, password, debugPort: prefe
 module.exports.ensureGmailLogin = ensureGmailLogin;
 module.exports.getProfilesBaseDir = getProfilesBaseDir;
 module.exports.setProfilesBaseDir = setProfilesBaseDir;
+module.exports.connectToBrowserByUserDataDir = connectToBrowserByUserDataDir;
 
 
 
