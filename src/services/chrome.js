@@ -162,6 +162,7 @@ async function launchChromeProfile({ name, userDataDir, profileDirName = 'Defaul
     `--profile-directory=${profileDirName}`,
     '--no-first-run',
     '--no-default-browser-check',
+    '--start-maximized', // Tự động maximize window khi launch
   ];
   const launchArgs = [...baseArgs, ...extraArgs];
 
@@ -227,11 +228,23 @@ async function launchChromeProfile({ name, userDataDir, profileDirName = 'Defaul
       const { ACCOUNT_GOOGLE } = require('../constants/constants');
       const cred = Array.isArray(ACCOUNT_GOOGLE) && ACCOUNT_GOOGLE.length > 0 ? ACCOUNT_GOOGLE[0] : null;
       if (cred) {
-        const out = await ensureGmailLoggedInScript({ userDataDir: resolvedUserDataDir, email: cred.email, password: cred.password, debugPort });
+        const out = await ensureGmailLoggedInScript({ 
+          userDataDir: resolvedUserDataDir, 
+          email: cred.email, 
+          password: cred.password, 
+          debugPort,
+          profileDirName // Truyền profileDirName vào ensureGmailLoggedIn
+        });
         gmailCheckStatus = out.status || 'unknown';
       } else if (puppeteer) {
         // Fallback: just navigate to login if no credentials provided
-        const out = await ensureGmailLoggedInScript({ userDataDir: resolvedUserDataDir, email: '', password: '', debugPort });
+        const out = await ensureGmailLoggedInScript({ 
+          userDataDir: resolvedUserDataDir, 
+          email: '', 
+          password: '', 
+          debugPort,
+          profileDirName // Truyền profileDirName vào ensureGmailLoggedIn
+        });
         gmailCheckStatus = out.status || 'unknown';
       }
     } catch (_) {
