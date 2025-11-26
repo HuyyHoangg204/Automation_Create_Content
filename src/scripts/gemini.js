@@ -163,33 +163,153 @@ async function uploadKnowledgeFiles(page, files) {
   if (!existing.length) return false;
 
   try {
+    // Step 1: Patch HTMLInputElement.prototype.click to prevent OS dialog
+    await page.evaluate(() => {
+      // Store original click method
+      const originalClick = HTMLInputElement.prototype.click;
+      
+      // Patch click method
+      HTMLInputElement.prototype.click = function() {
+        // If this is a file input, don't call native click (prevent OS dialog)
+        if (this.type === 'file') {
+          // Just return without calling native click
+          // This allows Gemini to create input but prevents OS dialog
+          return;
+        }
+        // For other input types, call original click
+        return originalClick.call(this);
+      };
+      
+      // Store reference so we can restore later if needed
+      window.__puppeteer_patched_input_click = originalClick;
+    });
+
     // Click the small plus in Knowledge footer (NOT the 'Add from Drive' item)
     const clickedPlus = await clickSelectors(page, [
       'button[data-test-id="bot-uploader-button"]',
       'div.file-upload-footer button'
-    ], { timeoutMs: 1500 }).catch(() => {});
+    ], { timeoutMs: 3000 }).catch(() => false);
 
-    // Register filechooser and try to click the Upload files item in the opened menu
-    const chooserPromise = new Promise((resolve) => page.once('filechooser', resolve));
+    // Wait for menu to appear
+    await new Promise((r) => setTimeout(r, 500));
+
+    // Click "Upload files" menu item (Gemini will try to click input, but our patch prevents OS dialog)
     const clickedUploadItem = await clickSelectors(page, [
       'button[data-test-id="local-images-files-uploader-button"]',
       'button[aria-label="Upload files"]',
-    ], { timeoutMs: 1500 }).catch(() => {});
-    if (clickedUploadItem) {
-      const fileChooser = await Promise.race([
-        chooserPromise,
-        new Promise((resolve, reject) => setTimeout(() => reject(new Error('no filechooser')), 2000)),
-      ]);
-      if (fileChooser) {
-        await fileChooser.accept(existing);
-        return true;
+      'button[aria-label*="Upload" i]',
+    ], { timeoutMs: 3000 }).catch(() => false);
+    
+    if (!clickedUploadItem) {
+      // Fallback: try clicking by text
+      await clickByText(page, ['Upload files', 'Tải tệp lên'], { timeoutMs: 2000 }).catch(() => false);
+    }
+
+    // Wait for input to be created (Gemini will try to click it, but our patch prevents OS dialog)
+    await new Promise((r) => setTimeout(r, 500));
+
+    // Step 2: Find the input that Gemini created (should be in DOM now, no OS dialog opened)
+    const fileInputSelectors = [
+      '#cdk-overlay-1 > mat-card > mat-action-list > images-files-uploader > input[type=file]',
+      'input[type="file"][name="Filedata"]',
+      'images-files-uploader input[type="file"]',
+      'input[type="file"][multiple]',
+      'input[type="file"]'
+    ];
+    
+    let fileInput = null;
+    let foundSelector = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      for (const selector of fileInputSelectors) {
+        try {
+          fileInput = await page.$(selector);
+          if (fileInput) {
+            foundSelector = selector;
+            break;
+          }
+        } catch (e) {
+          // Continue to next selector
+        }
+      }
+      
+      if (fileInput) break;
+      
+      // If not found, wait a bit and try again
+      if (!fileInput) {
+        await new Promise((r) => setTimeout(r, 200));
       }
     }
+
+    if (fileInput) {
+      // Step 3: Use Puppeteer uploadFile() to upload files (no OS dialog because click is patched)
+      try {
+        await fileInput.uploadFile(...existing);
+        
+        // Step 4: Trigger change event to notify Gemini handlers
+        await page.evaluate((sel) => {
+          const input = document.querySelector(sel);
+          if (input) {
+            input.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+        }, foundSelector);
+        
+        // Step 5: Restore original click method
+        await page.evaluate(() => {
+          if (window.__puppeteer_patched_input_click) {
+            HTMLInputElement.prototype.click = window.__puppeteer_patched_input_click;
+            delete window.__puppeteer_patched_input_click;
+          }
+        });
+        
+        // Wait for upload to process
+        await new Promise((r) => setTimeout(r, 2000));
+        return true;
+      } catch (uploadError) {
+        // Restore original click method even on error
+        await page.evaluate(() => {
+          if (window.__puppeteer_patched_input_click) {
+            HTMLInputElement.prototype.click = window.__puppeteer_patched_input_click;
+            delete window.__puppeteer_patched_input_click;
+          }
+        });
+        // Continue to fallback
+      }
+    } else {
+      // Restore original click method if input not found
+      await page.evaluate(() => {
+        if (window.__puppeteer_patched_input_click) {
+          HTMLInputElement.prototype.click = window.__puppeteer_patched_input_click;
+          delete window.__puppeteer_patched_input_click;
+        }
+      });
+    }
   } catch (e) {
-    logger.info({ err: e?.message }, 'gemini:plus/filechooser path failed, fallback to hidden input');
+    // Restore original click method on error
+    await page.evaluate(() => {
+      if (window.__puppeteer_patched_input_click) {
+        HTMLInputElement.prototype.click = window.__puppeteer_patched_input_click;
+        delete window.__puppeteer_patched_input_click;
+      }
+    }).catch(() => {});
+    // Continue to fallback
   }
 
   // 2) Fallback: try to locate hidden input and set files directly (may not always be present)
+  // Ensure patch is still active for fallback
+  await page.evaluate(() => {
+    if (!window.__puppeteer_patched_input_click) {
+      const originalClick = HTMLInputElement.prototype.click;
+      HTMLInputElement.prototype.click = function() {
+        if (this.type === 'file') {
+          return;
+        }
+        return originalClick.call(this);
+      };
+      window.__puppeteer_patched_input_click = originalClick;
+    }
+  });
+
   let input = await page.$([
     'div.editor-container.hide-on-mobile-preview input[type="file"]',
     'div.editor-container-inner input[type="file"]',
@@ -202,16 +322,42 @@ async function uploadKnowledgeFiles(page, files) {
     await new Promise((r) => setTimeout(r, 400));
     input = await page.$('input[type="file"], input.hidden-local-upload-button');
   }
-  if (!input) return false;
+  if (!input) {
+    // Restore original click method
+    await page.evaluate(() => {
+      if (window.__puppeteer_patched_input_click) {
+        HTMLInputElement.prototype.click = window.__puppeteer_patched_input_click;
+        delete window.__puppeteer_patched_input_click;
+      }
+    }).catch(() => {});
+    return false;
+  }
   try {
     if (input.uploadFile) {
       await input.uploadFile(...existing);
     } else if (page.setInputFiles) {
       await page.setInputFiles(input, existing);
     }
+    
+    // Restore original click method
+    await page.evaluate(() => {
+      if (window.__puppeteer_patched_input_click) {
+        HTMLInputElement.prototype.click = window.__puppeteer_patched_input_click;
+        delete window.__puppeteer_patched_input_click;
+      }
+    }).catch(() => {});
+    
     return true;
   } catch (e) {
-    // Try FileChooser flow
+    // Restore original click method on error
+    await page.evaluate(() => {
+      if (window.__puppeteer_patched_input_click) {
+        HTMLInputElement.prototype.click = window.__puppeteer_patched_input_click;
+        delete window.__puppeteer_patched_input_click;
+      }
+    }).catch(() => {});
+    
+    // Try FileChooser flow (should not trigger OS dialog if patch is active)
     try {
       const chooserPromise = new Promise((resolve) => page.once('filechooser', resolve));
       const fileChooser = await Promise.race([
@@ -220,11 +366,29 @@ async function uploadKnowledgeFiles(page, files) {
       ]);
       if (fileChooser) {
         await fileChooser.accept(existing);
+        
+        // Restore original click method
+        await page.evaluate(() => {
+          if (window.__puppeteer_patched_input_click) {
+            HTMLInputElement.prototype.click = window.__puppeteer_patched_input_click;
+            delete window.__puppeteer_patched_input_click;
+          }
+        }).catch(() => {});
+        
         return true;
       }
     } catch (e2) {
-      logger.info({ err: e2?.message }, 'gemini:filechooser failed');
+      // Ignore
     }
+    
+    // Restore original click method
+    await page.evaluate(() => {
+      if (window.__puppeteer_patched_input_click) {
+        HTMLInputElement.prototype.click = window.__puppeteer_patched_input_click;
+        delete window.__puppeteer_patched_input_click;
+      }
+    }).catch(() => {});
+    
     return false;
   }
 }
@@ -232,39 +396,153 @@ async function uploadKnowledgeFiles(page, files) {
 async function createGem({ userDataDir, name, description, instructions, knowledgeFiles, debugPort }) {
   const { browser } = await connectToBrowserByUserDataDir(userDataDir, debugPort);
   let status = 'unknown';
+  let page = null;
   try {
-    const page = await browser.newPage();
+    page = await browser.newPage();
+
+    // Step 1: Patch HTMLInputElement.prototype.click to prevent OS dialog
+    await page.evaluate(() => {
+      // Store original click method
+      const originalClick = HTMLInputElement.prototype.click;
+      
+      // Patch click method
+      HTMLInputElement.prototype.click = function() {
+        // If this is a file input, don't call native click (prevent OS dialog)
+        if (this.type === 'file') {
+          // Just return without calling native click
+          // This allows Gemini to create input but prevents OS dialog
+          return;
+        }
+        // For other input types, call original click
+        return originalClick.call(this);
+      };
+      
+      // Store reference so we can restore later if needed
+      window.__puppeteer_patched_input_click = originalClick;
+    });
 
     await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: 30000 });
     const host = (() => { try { return new URL(page.url()).hostname; } catch { return ''; } })();
+    logger.info({ url: page.url(), host }, '[Gemini] Navigated to Gemini app');
+    
     if (host.includes('accounts.google.com')) {
       status = 'not_logged_in';
+      logger.warn({ url: page.url() }, '[Gemini] Not logged in, redirected to accounts.google.com');
       return { status };
     }
 
+    // Debug: Check if Explore Gems button exists
+    logger.info({}, '[Gemini] Looking for Explore Gems button');
+    const exploreGemsInfo = await page.evaluate(() => {
+      const selectors = [
+        'button[aria-label="Explore Gems"]',
+        'button[aria-label*="Explore Gems" i]',
+        '[aria-label="Explore Gems"]',
+      ];
+      const results = {};
+      for (const sel of selectors) {
+        const els = Array.from(document.querySelectorAll(sel));
+        results[sel] = els.map(el => ({
+          visible: el.offsetParent !== null,
+          text: (el.textContent || el.innerText || '').trim(),
+          ariaLabel: el.getAttribute('aria-label'),
+          disabled: el.disabled || el.getAttribute('aria-disabled') === 'true',
+          tagName: el.tagName,
+          className: el.className
+        }));
+      }
+      // Also check by text
+      const allButtons = Array.from(document.querySelectorAll('button, [role="button"], a, span, div'));
+      const exploreTexts = allButtons.filter(el => {
+        const text = (el.textContent || el.innerText || '').trim();
+        return /explore gems|khám phá gems/i.test(text);
+      }).map(el => ({
+        visible: el.offsetParent !== null,
+        text: (el.textContent || el.innerText || '').trim(),
+        ariaLabel: el.getAttribute('aria-label'),
+        tagName: el.tagName,
+        className: el.className
+      }));
+      results.byText = exploreTexts;
+      return results;
+    });
+    logger.info({ exploreGemsInfo }, '[Gemini] Explore Gems button search results');
 
     // Click Explore Gems in the sidebar (prefer aria-label selector to avoid accidental matches)
-    const clickedExplore = await clickSelectors(page, [
+    logger.info({}, '[Gemini] Attempting to click Explore Gems by selectors');
+    const clickedExploreBySelectors = await clickSelectors(page, [
       'button[aria-label="Explore Gems"]',
       'button[aria-label*="Explore Gems" i]',
       '[aria-label="Explore Gems"]',
-    ], { timeoutMs: 12000 }) || await clickByText(page, ['Explore Gems', 'Khám phá Gems'], { timeoutMs: 8000 });
+    ], { timeoutMs: 12000 });
+    logger.info({ clickedExploreBySelectors }, '[Gemini] Click Explore Gems by selectors result');
+    
+    let clickedExplore = clickedExploreBySelectors;
+    if (!clickedExplore) {
+      logger.info({}, '[Gemini] Selectors failed, trying to click by text');
+      clickedExplore = await clickByText(page, ['Explore Gems', 'Khám phá Gems'], { timeoutMs: 8000 });
+      logger.info({ clickedExplore }, '[Gemini] Click Explore Gems by text result');
+    }
+    logger.info({ clickedExplore }, '[Gemini] Explore Gems clicked, waiting for navigation');
     await Promise.race([
       page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {}),
       new Promise((r) => setTimeout(r, 1200)),
     ]);
+    logger.info({ url: page.url() }, '[Gemini] After Explore Gems navigation');
 
     // Try click New Gem button inside Gem manager
     let clickedNew = false;
     if (clickedExplore) {
+      logger.info({}, '[Gemini] Looking for New Gem button');
+      // Debug: Check if New Gem button exists
+      const newGemInfo = await page.evaluate(() => {
+        const selectors = [
+          '[data-test-id="open-bots-creation-button"]',
+          'button[data-test-id*="open-bots-creation"]',
+          'button[data-test-id*="creation"]',
+          'button.mat-mdc-button-base.bot-creation-button',
+        ];
+        const results = {};
+        for (const sel of selectors) {
+          const els = Array.from(document.querySelectorAll(sel));
+          results[sel] = els.map(el => ({
+            visible: el.offsetParent !== null,
+            text: (el.textContent || el.innerText || '').trim(),
+            dataTestId: el.getAttribute('data-test-id'),
+            disabled: el.disabled || el.getAttribute('aria-disabled') === 'true',
+            tagName: el.tagName,
+            className: el.className
+          }));
+        }
+        // Also check by text
+        const allButtons = Array.from(document.querySelectorAll('button, [role="button"]'));
+        const newGemTexts = allButtons.filter(el => {
+          const text = (el.textContent || el.innerText || '').trim();
+          return /new gem|create new gem|create a gem|tạo gem|tạo mới/i.test(text);
+        }).map(el => ({
+          visible: el.offsetParent !== null,
+          text: (el.textContent || el.innerText || '').trim(),
+          disabled: el.disabled || el.getAttribute('aria-disabled') === 'true',
+          tagName: el.tagName,
+          className: el.className
+        }));
+        results.byText = newGemTexts;
+        return results;
+      });
+      logger.info({ newGemInfo }, '[Gemini] New Gem button search results');
+      logger.info({}, '[Gemini] Attempting to click New Gem by selectors');
       clickedNew = await clickSelectors(page, [
         '[data-test-id="open-bots-creation-button"]',
         'button[data-test-id*="open-bots-creation"]',
         'button[data-test-id*="creation"]',
         'button.mat-mdc-button-base.bot-creation-button',
       ], { timeoutMs: 8000 });
+      logger.info({ clickedNew }, '[Gemini] Click New Gem by selectors result');
+      
       if (!clickedNew) {
+        logger.info({}, '[Gemini] Selectors failed, trying to click New Gem by text');
         clickedNew = await clickByText(page, ['New Gem', 'Create new Gem', 'Create a Gem', 'Tạo Gem', 'Tạo mới'], { timeoutMs: 6000 });
+        logger.info({ clickedNew }, '[Gemini] Click New Gem by text result');
       }
       if (clickedNew) {
         await Promise.race([
@@ -302,6 +580,7 @@ async function createGem({ userDataDir, name, description, instructions, knowled
             }
           }
         }
+        let saveClicked = false;
         if (knowledgeFiles && knowledgeFiles.length) {
           const ok = await uploadKnowledgeFiles(page, knowledgeFiles);
 					if (ok) {
@@ -337,18 +616,83 @@ async function createGem({ userDataDir, name, description, instructions, knowled
 						} catch (_) {
 							// If it didn't become enabled in time, still try clicking optimistically
 						}
-						await clickSelectors(page, candidates, { timeoutMs: 5000 })
+						saveClicked = await clickSelectors(page, candidates, { timeoutMs: 5000 })
 							|| await clickByText(page, ['Save', 'Lưu'], { timeoutMs: 5000 });
+						
+						// Đợi một chút sau khi click Save để xem có navigation hoặc thay đổi không
+						if (saveClicked) {
+							await Promise.race([
+								page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {}),
+								new Promise((r) => setTimeout(r, 2000))
+							]);
+						}
 					}
+        } else {
+          // Không có files, vẫn cần click Save nếu có name/description/instructions
+          if (name || description || instructions) {
+            const candidates = [
+              'button[data-test-id="save-button"]',
+              'button[aria-label="Save"]',
+              'button[aria-label*="Save" i]',
+              'button.save-button'
+            ];
+            try {
+              await page.waitForFunction((sels) => {
+                const enabled = (el) => {
+                  if (!el) return false;
+                  const disabledAttr = el.getAttribute('disabled');
+                  const ariaDisabled = el.getAttribute('aria-disabled');
+                  const classDisabled = (el.className || '').toLowerCase().includes('disabled');
+                  const isHidden = !(el.offsetParent || el.getClientRects().length);
+                  return !disabledAttr && ariaDisabled !== 'true' && !classDisabled && !isHidden;
+                };
+                for (const s of sels) {
+                  const el = document.querySelector(s);
+                  if (enabled(el)) return true;
+                }
+                return false;
+              }, { timeout: 10000 }, candidates);
+            } catch (_) {
+              // Ignore
+            }
+            saveClicked = await clickSelectors(page, candidates, { timeoutMs: 5000 })
+              || await clickByText(page, ['Save', 'Lưu'], { timeoutMs: 5000 });
+            
+            if (saveClicked) {
+              await Promise.race([
+                page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {}),
+                new Promise((r) => setTimeout(r, 2000))
+              ]);
+            }
+          }
+        }
+        
+        // Xác định status dựa trên kết quả
+        if (clickedNew && saveClicked) {
+          status = 'gem_created';
+        } else if (clickedNew && !saveClicked) {
+          status = 'gem_form_filled_but_not_saved';
+        } else {
+          status = clickedNew ? 'new_gem_clicked' : (clickedExplore ? 'opened_explore' : 'noop');
         }
       }
     }
 
-    status = clickedNew ? 'new_gem_clicked' : (clickedExplore ? 'opened_explore' : 'noop');
     return { status };
   } catch (e) {
     return { status: 'failed', error: e?.message || String(e) };
   } finally {
+    try {
+      // Restore original click method if patched
+      if (page && !page.isClosed()) {
+        await page.evaluate(() => {
+          if (window.__puppeteer_patched_input_click) {
+            HTMLInputElement.prototype.click = window.__puppeteer_patched_input_click;
+            delete window.__puppeteer_patched_input_click;
+          }
+        }).catch(() => {});
+      }
+    } catch (_) {}
     try { browser.disconnect(); } catch (_) {}
   }
 }

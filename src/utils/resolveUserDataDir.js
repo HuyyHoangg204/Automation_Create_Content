@@ -13,20 +13,22 @@ function sanitizeName(name) {
  * Hỗ trợ tự động tìm path trên các máy khác nhau (user khác nhau)
  * 
  * Ví dụ:
- * - Input: userDataDir = "Profile_huyyyhoang2004"
- * - Output: "C:\Users\tranh\AppData\Local\Automation_Profiles\Profile_huyyyhoang2004"
+ * - Input: profileDirName = "Profile_username"
+ * - Output: "C:\Users\tranh\AppData\Local\Automation_Profiles\Profile_username"
  * 
  * Logic:
  * 1. Nếu userDataDir đã là absolute path → return ngay
- * 2. Tìm trong profiles index trước (theo userDataDir nếu là folder name, hoặc theo name)
- * 3. Nếu không tìm thấy → build từ profilesBaseDir + folder name
+ * 2. Ưu tiên sử dụng profileDirName nếu có
+ * 3. Tìm trong profiles index trước (theo userDataDir nếu là folder name, hoặc theo name)
+ * 4. Nếu không tìm thấy → build từ profilesBaseDir + folder name
  * 
  * @param {Object} params - Parameters
  * @param {string} [params.userDataDir] - Có thể là absolute path hoặc chỉ tên folder (ví dụ: "Profile_huyyyhoang2004")
  * @param {string} [params.name] - Tên profile (optional, dùng để tìm nếu không có userDataDir)
+ * @param {string} [params.profileDirName] - Tên folder profile (ưu tiên, ví dụ: "Profile_username")
  * @returns {Promise<string>} - Absolute path của userDataDir
  */
-async function resolveUserDataDir({ userDataDir, name }) {
+async function resolveUserDataDir({ userDataDir, name, profileDirName }) {
   // 1. Nếu userDataDir đã là absolute path (chứa path separator), return ngay
   if (userDataDir && (userDataDir.includes(path.sep) || userDataDir.includes('/') || userDataDir.includes('\\'))) {
     // Kiểm tra xem có phải absolute path không
@@ -35,8 +37,11 @@ async function resolveUserDataDir({ userDataDir, name }) {
     }
   }
 
-  // 2. Tìm trong profiles index trước (theo userDataDir nếu là folder name, hoặc theo name)
-  const searchKey = userDataDir || name;
+  // 2. Ưu tiên sử dụng profileDirName nếu có
+  const folderNameToUse = profileDirName || userDataDir || name;
+  
+  // 3. Tìm trong profiles index trước (theo userDataDir nếu là folder name, hoặc theo name)
+  const searchKey = folderNameToUse;
   if (searchKey) {
     try {
       const profiles = await listChromeProfiles();
@@ -62,9 +67,9 @@ async function resolveUserDataDir({ userDataDir, name }) {
     }
   }
 
-  // 3. Fallback: Build từ profilesBaseDir + folder name
+  // 4. Fallback: Build từ profilesBaseDir + folder name
   const profilesBase = await getProfilesBaseDir();
-  const folderName = userDataDir || sanitizeName(name || 'profile');
+  const folderName = profileDirName || userDataDir || sanitizeName(name || 'profile');
   return path.join(profilesBase, folderName);
 }
 
