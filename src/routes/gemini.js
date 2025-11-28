@@ -36,7 +36,7 @@ router.post('/gems', async (req, res, next) => {
     }
     
     const { name, userDataDir: inputUserDataDir, profileDirName, gemName, description, instructions, knowledgeFiles, debugPort } = parsed.data;
-    
+
     // Extract entity info
     const entityID = req.headers['x-entity-id'] || req.body.entity_id || 'unknown';
     const userID = req.headers['x-user-id'] || req.body.user_id || 'unknown';
@@ -519,6 +519,15 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
           status: sendPromptResult.status,
           error: sendPromptResult.error || undefined
         });
+    }
+    
+    // Xóa file outline sau khi hoàn thành (thành công hoặc thất bại) để tránh tích lũy
+    if (fs.existsSync(outlineFilePath)) {
+      try {
+        fs.unlinkSync(outlineFilePath);
+      } catch (unlinkErr) {
+        // Ignore error khi xóa file
+      }
     }
     
     return res.json({
