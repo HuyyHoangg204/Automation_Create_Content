@@ -20,27 +20,16 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
   let status = 'unknown';
   try {
     const page = await browser.newPage();
-    page.on('console', (msg) => (logger && logger.info ? logger.info({ type: msg.type(), text: msg.text() }, 'notebooklm: page console') : null));
-
     const url = 'https://notebooklm.google.com/';
-    logger.info({ url }, 'notebooklm:navigate');
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     
     const host = (() => { try { return new URL(page.url()).hostname; } catch { return ''; } })();
-    logger.info({ host, url: page.url() }, 'notebooklm: page loaded, checking login status');
     if (host.includes('accounts.google.com')) {
-      logger.info({}, 'notebooklm: user not logged in, returning early');
       status = 'not_logged_in';
       return { status, url: page.url() };
     }
-    logger.info({}, 'notebooklm: user is logged in, continuing');
 
-    // Wait a bit for page to fully load
-    logger.info({}, 'notebooklm: waiting for page to load');
     await new Promise((r) => setTimeout(r, 2000));
-
-    // Check and handle welcome popup for new accounts
-    logger.info({}, 'notebooklm: checking for welcome popup');
     try {
       const welcomePopup = await page.evaluate(() => {
         // Look for modal/dialog containing "Welcome to NotebookLM"
@@ -55,8 +44,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
       });
 
       if (welcomePopup) {
-        logger.info({}, 'notebooklm: welcome popup detected, attempting to dismiss');
-        
         // Find and click OK button in the welcome modal
         const buttonClicked = await page.evaluate(() => {
           // First, find the modal containing "Welcome to NotebookLM"
@@ -88,7 +75,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
         });
 
         if (buttonClicked) {
-          logger.info({}, 'notebooklm: welcome popup dismissed');
           await new Promise((r) => setTimeout(r, 1000));
         } else {
           logger.warn({}, 'notebooklm: welcome popup detected but could not dismiss');
@@ -99,9 +85,7 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
     }
 
     // Click "Create new notebook" button
-    logger.info({}, 'notebooklm: starting Create new notebook click logic');
     try {
-      logger.info({}, 'notebooklm: attempting to click Create new notebook');
       
       // Wait a bit after popup dismissal
       await new Promise((r) => setTimeout(r, 1000));
@@ -135,7 +119,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
           const isVisible = await matCard.isVisible();
           if (isVisible) {
             await matCard.click({ timeout: 2000 });
-            logger.info({}, 'notebooklm: clicked mat-card.create-new-action-button');
             createClicked = true;
           } else {
             logger.debug({}, 'notebooklm: mat-card found but not visible');
@@ -155,7 +138,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
             const isVisible = await actionButton.isVisible();
             if (isVisible) {
               await actionButton.click({ timeout: 2000 });
-              logger.info({}, 'notebooklm: clicked .create-new-action-button');
               createClicked = true;
             }
           }
@@ -174,7 +156,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
               const isVisible = await card.isVisible();
               if (isVisible) {
                 await card.click({ timeout: 2000 });
-                logger.info({}, 'notebooklm: clicked mat-card[role="button"] with text');
                 createClicked = true;
                 break;
               }
@@ -204,20 +185,17 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
         });
         
         if (result) {
-          logger.info({}, 'notebooklm: clicked using evaluate fallback');
           createClicked = true;
         }
       }
 
       if (createClicked) {
-        logger.info({}, 'notebooklm: Create new notebook clicked');
         await new Promise((r) => setTimeout(r, 2000));
         status = 'notebook_created';
         
         // Add sources if provided
         if (website || youtube || textContent) {
           try {
-            logger.info({}, 'notebooklm: waiting for Add sources modal');
             // Wait for "Add sources" modal to appear (it may already be open after Create new notebook)
             await page.waitForSelector('[role="dialog"], .modal, [class*="modal"], [class*="dialog"]', { 
               timeout: 10000,
@@ -255,7 +233,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
             // Add website source
             if (website && Array.isArray(website) && website.length > 0) {
               try {
-                logger.info({ websiteCount: website.length }, 'notebooklm: adding website sources');
                 
                 // Priority 1: Try to find by ID
                 let websiteChip = await page.$('mat-chip#mat-mdc-chip-1');
@@ -296,7 +273,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                   await websiteChip.evaluate((el) => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
                   await new Promise((r) => setTimeout(r, 300));
                   await websiteChip.click({ timeout: 2000 });
-                  logger.info({}, 'notebooklm: Website chip clicked');
                   
                   await new Promise((r) => setTimeout(r, 1500));
                   
@@ -318,7 +294,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                       if (insertButtonXpath && insertButtonXpath.length > 0) {
                         await insertButtonXpath[0].click({ timeout: 2000 });
                         insertClicked = true;
-                        logger.info({}, 'notebooklm: Insert button clicked (by xpath)');
                       }
                     } catch (e) {
                       logger.debug({ err: e }, 'notebooklm: xpath selector failed');
@@ -333,7 +308,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                           if (insertButton) {
                             await insertButton.click({ timeout: 2000 });
                             insertClicked = true;
-                            logger.info({}, 'notebooklm: Insert button clicked (in website-upload form)');
                           }
                         }
                       } catch (e) {
@@ -347,7 +321,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                       if (insertButton) {
                         await insertButton.click({ timeout: 2000 });
                         insertClicked = true;
-                        logger.info({}, 'notebooklm: Insert button clicked (by class)');
                       }
                     }
                     
@@ -366,13 +339,11 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                       });
                       if (insertByText) {
                         insertClicked = true;
-                        logger.info({}, 'notebooklm: Insert button clicked (by text)');
                       }
                     }
                     
                     if (insertClicked) {
                       await new Promise((r) => setTimeout(r, 1000));
-                      logger.info({ urlCount: website.length }, 'notebooklm: website URLs entered and Insert clicked');
                     } else {
                       logger.warn({}, 'notebooklm: Insert button not found, URLs entered but not submitted');
                     }
@@ -390,12 +361,10 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
             // Add YouTube source (insert one by one)
             if (youtube && Array.isArray(youtube) && youtube.length > 0) {
               try {
-                logger.info({ youtubeCount: youtube.length }, 'notebooklm: adding YouTube sources');
                 
                 for (let i = 0; i < youtube.length; i += 1) {
                   const youtubeUrl = youtube[i];
                   try {
-                    logger.info({ url: youtubeUrl, index: i + 1, total: youtube.length }, 'notebooklm: processing YouTube URL');
                     
                     // Click "Add source" button only if modal is not open
                     const modalOpen = await isModalOpen();
@@ -403,7 +372,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                       const addSourceButton = await page.$('button[aria-label="Add source"], [aria-label="Add source"]');
                       if (addSourceButton) {
                         await addSourceButton.click({ timeout: 2000 });
-                        logger.info({}, 'notebooklm: Add source button clicked');
                         await new Promise((r) => setTimeout(r, 1500));
                         // Wait for modal to appear
                         await page.waitForSelector('[role="dialog"], .modal, [class*="modal"], [class*="dialog"]', { 
@@ -414,7 +382,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                         });
                       }
                     } else {
-                      logger.info({}, 'notebooklm: modal already open, skipping Add source click');
                     }
                     
                     // Find YouTube chip by text "YouTube"
@@ -433,7 +400,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                       await youtubeChip.evaluate((el) => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
                       await new Promise((r) => setTimeout(r, 300));
                       await youtubeChip.click({ timeout: 2000 });
-                      logger.info({}, 'notebooklm: YouTube chip clicked');
                       
                       await new Promise((r) => setTimeout(r, 1500));
                       
@@ -453,7 +419,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                           if (insertButtonXpath && insertButtonXpath.length > 0) {
                             await insertButtonXpath[0].click({ timeout: 2000 });
                             insertClicked = true;
-                            logger.info({}, 'notebooklm: Insert button clicked (by xpath)');
                           }
                         } catch (e) {
                           logger.debug({ err: e }, 'notebooklm: xpath selector failed');
@@ -468,7 +433,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                               if (insertButton) {
                                 await insertButton.click({ timeout: 2000 });
                                 insertClicked = true;
-                                logger.info({}, 'notebooklm: Insert button clicked (in youtube-upload form)');
                               }
                             }
                           } catch (e) {
@@ -482,7 +446,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                           if (insertButton) {
                             await insertButton.click({ timeout: 2000 });
                             insertClicked = true;
-                            logger.info({}, 'notebooklm: Insert button clicked (by class)');
                           }
                         }
                         
@@ -501,13 +464,11 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                           });
                           if (insertByText) {
                             insertClicked = true;
-                            logger.info({}, 'notebooklm: Insert button clicked (by text)');
                           }
                         }
                         
                         if (insertClicked) {
                           await new Promise((r) => setTimeout(r, 1500));
-                          logger.info({ url: youtubeUrl, index: i + 1 }, 'notebooklm: YouTube URL inserted');
                         } else {
                           logger.warn({ url: youtubeUrl }, 'notebooklm: Insert button not found, YouTube URL entered but not submitted');
                         }
@@ -522,7 +483,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                   }
                 }
                 
-                logger.info({ total: youtube.length }, 'notebooklm: finished processing all YouTube URLs');
               } catch (e) {
                 logger.warn({ err: e }, 'notebooklm: error adding YouTube sources');
               }
@@ -530,7 +490,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
             // Add text content source
             if (textContent) {
               try {
-                logger.info({ textLength: textContent.length }, 'notebooklm: adding text content source');
                 
                 // Click "Add source" button only if modal is not open
                 const modalOpen = await isModalOpen();
@@ -538,7 +497,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                   const addSourceButton = await page.$('button[aria-label="Add source"], [aria-label="Add source"]');
                   if (addSourceButton) {
                     await addSourceButton.click({ timeout: 2000 });
-                    logger.info({}, 'notebooklm: Add source button clicked for textContent');
                     await new Promise((r) => setTimeout(r, 1500));
                     // Wait for modal to appear
                     await page.waitForSelector('[role="dialog"], .modal, [class*="modal"], [class*="dialog"]', { 
@@ -549,13 +507,11 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                     });
                   }
                 } else {
-                  logger.info({}, 'notebooklm: modal already open, skipping Add source click');
                 }
                 
                 // Find mat-chip containing "Copied text" or "Paste text" by text
                 let textChip = null;
                 const allChips = await page.$$('mat-chip');
-                logger.info({ chipCount: allChips.length }, 'notebooklm: found mat-chips, searching for Copied text');
                 for (const chip of allChips) {
                   const text = await chip.evaluate((el) => (el.textContent || '').trim());
                   if (text === 'Copied text' || text.includes('Copied text') || 
@@ -570,7 +526,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                   await textChip.evaluate((el) => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
                   await new Promise((r) => setTimeout(r, 300));
                   await textChip.click({ timeout: 2000 });
-                  logger.info({}, 'notebooklm: Copied text chip clicked');
                   
                   await new Promise((r) => setTimeout(r, 1500));
                   
@@ -640,7 +595,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                             await new Promise((r) => setTimeout(r, 200));
                             await btn.click({ timeout: 2000 });
                             insertClicked = true;
-                            logger.info({}, 'notebooklm: Insert button clicked (by text and type)');
                             break;
                           }
                         }
@@ -662,7 +616,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                               await new Promise((r) => setTimeout(r, 200));
                               await insertButton.click({ timeout: 2000 });
                               insertClicked = true;
-                              logger.info({}, 'notebooklm: Insert button clicked (in form)');
                             }
                           }
                         }
@@ -687,13 +640,11 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                       });
                       if (insertByText) {
                         insertClicked = true;
-                        logger.info({}, 'notebooklm: Insert button clicked (by text evaluate)');
                       }
                     }
                     
                     if (insertClicked) {
                       await new Promise((r) => setTimeout(r, 1000));
-                      logger.info({}, 'notebooklm: text content entered and Insert clicked');
                     } else {
                       logger.warn({}, 'notebooklm: Insert button not found, text content entered but not submitted');
                     }
@@ -711,7 +662,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
           // Enter prompt after all sources are added
           if (prompt) {
             try {
-              logger.info({ promptLength: prompt.length }, 'notebooklm: entering prompt');
               
               // Wait a bit for any modals to close
               await new Promise((r) => setTimeout(r, 1000));
@@ -764,7 +714,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                 await promptTextarea.type(prompt, { delay: 10 });
                 await new Promise((r) => setTimeout(r, 500));
                 
-                logger.info({}, 'notebooklm: prompt entered');
                 
                 // Wait for Submit button to be enabled (button is disabled until text is entered)
                 await page.waitForFunction(
@@ -790,7 +739,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                 let cdpSession = null;
                 
                 if (outputFile) {
-                  logger.info({}, 'notebooklm: setting up CDP to wait for response to finish');
                   
                   responseFinishedPromise = new Promise((resolve) => {
                     const client = page._client();
@@ -806,14 +754,12 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                       const { response } = event;
                       if (response.url.includes('GenerateFreeFormStreamed') && response.status === 200) {
                         targetRequestId = event.requestId;
-                        logger.info({ url: response.url, requestId: targetRequestId }, 'notebooklm: intercepted GenerateFreeFormStreamed response');
                       }
                     });
                     
                     // Wait for loading finished (indicates response is complete)
                     client.on('Network.loadingFinished', (event) => {
                       if (event.requestId === targetRequestId && targetRequestId) {
-                        logger.info({ requestId: targetRequestId }, 'notebooklm: loading finished, getting response body');
                         // Just resolve to indicate response is finished, don't get body
                         resolve(true);
                       }
@@ -840,7 +786,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                       await submitButton.evaluate((el) => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
                       await new Promise((r) => setTimeout(r, 200));
                       await submitButton.click({ timeout: 2000 });
-                      logger.info({}, 'notebooklm: Submit button clicked');
                     } else {
                       logger.warn({}, 'notebooklm: Submit button found but still disabled');
                     }
@@ -854,7 +799,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                 // Wait for response to finish generating, then scroll down and click copy button
                 if (outputFile && responseFinishedPromise) {
                   try {
-                    logger.info({}, 'notebooklm: waiting for response to finish generating...');
                     
                     // Wait for Network.loadingFinished event (indicates response is complete)
                     await Promise.race([
@@ -889,19 +833,16 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                       await copyButton.evaluate((el) => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
                       await new Promise((r) => setTimeout(r, 500));
                       await copyButton.click({ timeout: 2000 });
-                      logger.info({}, 'notebooklm: copy button clicked');
                       
                       // Wait a bit for clipboard to be updated
                       await new Promise((r) => setTimeout(r, 500));
                       
                       // Open editpad.org in a new tab and paste text, then save to file
                       try {
-                        logger.info({}, 'notebooklm: opening editpad.org to paste and save text');
                         
                         // Open new tab with editpad.org
                         const editpadPage = await browser.newPage();
                         await editpadPage.goto('https://www.editpad.org/', { waitUntil: 'domcontentloaded', timeout: 30000 });
-                        logger.info({}, 'notebooklm: editpad.org loaded');
                         
                         // Wait for editor to be ready
                         await new Promise((r) => setTimeout(r, 2000));
@@ -958,7 +899,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                           // Wait for paste to complete (longer wait to ensure paste is done)
                           await new Promise((r) => setTimeout(r, 2000));
                           
-                          logger.info({}, 'notebooklm: text pasted into editpad');
                           
                           // Extract text from editor (with multiple attempts and better selectors)
                           let pastedText = '';
@@ -1010,14 +950,12 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                               }
                             }
                             
-                            logger.info({ textLength: pastedText ? pastedText.length : 0 }, 'notebooklm: text extracted from editpad');
                           } catch (extractErr) {
                             logger.warn({ err: extractErr }, 'notebooklm: error extracting text from editpad');
                           }
                           
                           // If still no text, try clicking download button as fallback
                           if (!pastedText || pastedText.length === 0) {
-                            logger.info({}, 'notebooklm: no text extracted, trying to click download button');
                             
                             try {
                               // Click download button
@@ -1031,7 +969,6 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                               });
                               
                               if (downloadClicked) {
-                                logger.info({}, 'notebooklm: download button clicked, file should be downloaded');
                                 // Note: File will be downloaded to browser's default download folder
                                 // We can't easily intercept and move it to outputFile path
                                 // So we'll still try to extract text one more time after a delay
@@ -1055,18 +992,16 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                             }
                           }
                           
-                          // Save to file
+                          // Save to file (outputFile path is already set to profile folder by caller)
                           if (pastedText && pastedText.length > 0) {
                             const outputPath = path.resolve(outputFile);
                             const outputDir = path.dirname(outputPath);
                             
                             if (!fs.existsSync(outputDir)) {
                               fs.mkdirSync(outputDir, { recursive: true });
-                              logger.info({ outputDir }, 'notebooklm: created output directory');
                             }
                             
                             fs.writeFileSync(outputPath, pastedText, 'utf8');
-                            logger.info({ outputFile: outputPath, textLength: pastedText.length }, 'notebooklm: response saved to file');
                           } else {
                             logger.warn({}, 'notebooklm: no text extracted from editpad, file not saved');
                           }

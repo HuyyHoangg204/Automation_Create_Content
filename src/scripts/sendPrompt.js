@@ -26,6 +26,320 @@ async function typeIntoEditable(page, handle, text) {
   } catch (_) { return false; }
 }
 
+function hasContinueText(text) {
+  if (!text || !text.trim()) return false;
+  
+  const normalized = text.toLowerCase().trim();
+  const continuePatterns = [
+    'còn tiếp, gõ continue để tiếp tục',
+    'còn tiếp',
+    'gõ continue để tiếp tục',
+    'continue để tiếp tục'
+  ];
+  
+  return continuePatterns.some(pattern => 
+    normalized.includes(pattern.toLowerCase())
+  );
+}
+
+function removeContinueText(text) {
+  if (!text || !text.trim()) return text;
+  
+  let cleaned = text;
+  
+  const continuePatterns = [
+    /còn tiếp,?\s*gõ\s*continue\s*để\s*tiếp\s*tục/gi,
+    /còn\s*tiếp/gi,
+    /gõ\s*continue\s*để\s*tiếp\s*tục/gi,
+    /continue\s*để\s*tiếp\s*tục/gi
+  ];
+  
+  for (const pattern of continuePatterns) {
+    cleaned = cleaned.replace(pattern, '');
+  }
+  
+  return cleaned.trim();
+}
+
+async function extractTextFromGemini(page, browser, userDataDir) {
+  try {
+    const copyButtons = await page.$$('copy-button');
+    
+    if (!copyButtons || copyButtons.length === 0) {
+      return { success: false, text: null, error: 'copy-button not found' };
+    }
+    
+    const copyButton = copyButtons[copyButtons.length - 1];
+    
+    let clicked = false;
+    try {
+      let innerButton = await copyButton.$('button');
+      if (!innerButton) {
+        innerButton = await copyButton.$('[role="button"]');
+      }
+      if (!innerButton) {
+        innerButton = copyButton;
+      }
+      
+      if (innerButton) {
+        await innerButton.evaluate((el) => el.scrollIntoView({ block: 'center', behavior: 'smooth' }));
+        await new Promise((r) => setTimeout(r, 300));
+        await innerButton.focus();
+        await innerButton.click({ timeout: 2000 });
+        await new Promise((r) => setTimeout(r, 1000));
+        clicked = true;
+      } else {
+        await copyButton.evaluate((el) => el.scrollIntoView({ block: 'center', behavior: 'smooth' }));
+        await new Promise((r) => setTimeout(r, 300));
+        await copyButton.focus();
+        await copyButton.click({ timeout: 2000 });
+        await new Promise((r) => setTimeout(r, 1000));
+        clicked = true;
+      }
+    } catch (clickErr) {
+      clicked = await page.evaluate(() => {
+        const copyButton = document.querySelector('copy-button');
+        if (copyButton) {
+          const innerButton = copyButton.querySelector('button') || 
+                             copyButton.querySelector('[role="button"]') ||
+                             copyButton;
+          try {
+            innerButton.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            innerButton.focus();
+            innerButton.click();
+            return true;
+          } catch (e) {
+            return false;
+          }
+        }
+        return false;
+      });
+    }
+    
+    if (!clicked) {
+      return { success: false, text: null, error: 'failed to click copy-button' };
+    }
+    
+    const tempDir = path.join(userDataDir, 'temp_downloads');
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
+    }
+    
+    const editpadPage = await browser.newPage();
+    
+    const client = editpadPage._client();
+    await client.send('Page.setDownloadBehavior', {
+      behavior: 'allow',
+      downloadPath: tempDir
+    });
+    
+    await editpadPage.goto('https://www.editpad.org/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    
+    await new Promise((r) => setTimeout(r, 2000));
+    
+    const editorFound = await editpadPage.evaluate(() => {
+      let editor = document.querySelector('textarea');
+      if (!editor) {
+        editor = document.querySelector('[contenteditable="true"]');
+      }
+      if (!editor) {
+        editor = document.querySelector('[role="textbox"]');
+      }
+      if (!editor) {
+        editor = document.querySelector('#editor, .editor, [class*="editor"], [id*="editor"]');
+      }
+      
+      if (editor) {
+        editor.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        editor.focus();
+        if (editor.tagName === 'TEXTAREA' || editor.tagName === 'INPUT') {
+          editor.value = '';
+        } else {
+          editor.textContent = '';
+          editor.innerText = '';
+        }
+        return true;
+      }
+      return false;
+    });
+    
+    if (!editorFound) {
+      await editpadPage.close();
+      return { success: false, text: null, error: 'editor not found on editpad.org' };
+    }
+    
+    await new Promise((r) => setTimeout(r, 500));
+    
+    await editpadPage.keyboard.down('Control');
+    await editpadPage.keyboard.press('a');
+    await editpadPage.keyboard.up('Control');
+    await new Promise((r) => setTimeout(r, 200));
+    
+    await editpadPage.keyboard.down('Control');
+    await editpadPage.keyboard.press('v');
+    await editpadPage.keyboard.up('Control');
+    
+    await new Promise((r) => setTimeout(r, 2000));
+    
+    await editpadPage.keyboard.down('Control');
+    await editpadPage.keyboard.press('a');
+    await editpadPage.keyboard.up('Control');
+    await new Promise((r) => setTimeout(r, 200));
+    
+    const downloadClicked = await editpadPage.evaluate(() => {
+      const downloadBtn = document.querySelector('button#downloadFile, button[data-text="Download"], button[id*="download"]');
+      if (downloadBtn) {
+        downloadBtn.click();
+        return true;
+      }
+      return false;
+    });
+    
+    if (!downloadClicked) {
+      await editpadPage.close();
+      return { success: false, text: null, error: 'download button not found' };
+    }
+    
+    await new Promise((r) => setTimeout(r, 1000));
+    
+    let downloadedFile = null;
+    const maxAttempts = 40;
+    const pollInterval = 500;
+    
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      await new Promise((r) => setTimeout(r, pollInterval));
+      
+      if (!fs.existsSync(tempDir)) {
+        continue;
+      }
+      
+      const files = fs.readdirSync(tempDir);
+      
+      const allFiles = files.filter(f => {
+        // Bỏ qua file đang download (.crdownload)
+        if (f.endsWith('.crdownload')) {
+          return false;
+        }
+        
+        const filePath = path.join(tempDir, f);
+        try {
+          const stats = fs.statSync(filePath);
+          return stats.isFile();
+        } catch {
+          return false;
+        }
+      });
+      
+      if (allFiles.length > 0) {
+        const fileStats = allFiles.map(f => {
+          const filePath = path.join(tempDir, f);
+          try {
+            const stats = fs.statSync(filePath);
+            return {
+              name: f,
+              path: filePath,
+              mtime: stats.mtime,
+              size: stats.size
+            };
+          } catch {
+            return null;
+          }
+        }).filter(f => f !== null);
+        
+        if (fileStats.length > 0) {
+          fileStats.sort((a, b) => b.mtime - a.mtime);
+          const newestFile = fileStats[0];
+          
+          if (newestFile.size > 0) {
+            downloadedFile = newestFile.path;
+            break;
+          }
+        }
+      }
+    }
+    
+    await editpadPage.close();
+    
+    if (!downloadedFile || !fs.existsSync(downloadedFile)) {
+      return { success: false, text: null, error: 'downloaded file not found' };
+    }
+    
+    await new Promise((r) => setTimeout(r, 500));
+    
+    if (!fs.existsSync(downloadedFile) || downloadedFile.endsWith('.crdownload')) {
+      return { success: false, text: null, error: 'downloaded file not ready' };
+    }
+    
+    const text = fs.readFileSync(downloadedFile, 'utf8');
+    
+    try {
+      fs.unlinkSync(downloadedFile);
+    } catch (unlinkErr) {
+      // Ignore
+    }
+    
+    return { success: true, text, error: null };
+  } catch (err) {
+    return { success: false, text: null, error: err.message };
+  }
+}
+
+async function sendContinuePrompt(page, onProgress) {
+  try {
+    const richTextarea = await page.$('rich-textarea');
+    if (richTextarea) {
+      const promptField = await richTextarea.$('.ql-editor, [contenteditable="true"], div[role="textbox"]');
+      if (promptField) {
+        const entered = await typeIntoEditable(page, promptField, 'continue');
+        if (!entered) {
+          return { success: false, error: 'failed to type continue' };
+        }
+      } else {
+        return { success: false, error: 'prompt field not found' };
+      }
+    } else {
+      return { success: false, error: 'rich-textarea not found' };
+    }
+    
+    const submitted = await page.evaluate(() => {
+      const sendButtons = [
+        'button[aria-label*="Send" i]',
+        'button[aria-label*="Submit" i]',
+        'button[type="submit"]',
+        'button.send-button',
+        'button[data-test-id*="send"]',
+      ];
+      
+      for (const sel of sendButtons) {
+        const btn = document.querySelector(sel);
+        if (btn && !btn.disabled) {
+          try {
+            btn.click();
+            return true;
+          } catch (e) {
+            // Continue
+          }
+        }
+      }
+      
+      return false;
+    });
+    
+    if (!submitted) {
+      await page.keyboard.press('Enter');
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    
+    if (onProgress) {
+      onProgress('gemini_generating', 'Đã gửi continue, đang chờ Gemini tiếp tục tạo kịch bản', {});
+    }
+    
+    return { success: true, error: null };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
 /**
  * Upload files to chat input area via file chooser
  * This function clicks a button to trigger file chooser, then accepts files
@@ -689,11 +1003,13 @@ async function uploadFilesViaFileChooser(page, files) {
  * @param {string} params.gem - Name of the Gem to select
  * @param {string[]} [params.listFile] - Array of file paths to upload
  * @param {string} params.prompt - Prompt text to send
+ * @param {Function} [params.onProgress] - Callback for progress updates: (stage, message, metadata) => void
  * @returns {Promise<{status: string, error?: string}>}
  */
-async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt }) {
+async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt, onProgress }) {
   const { browser } = await connectToBrowserByUserDataDir(userDataDir, debugPort);
   let status = 'unknown';
+  let copiedText = null;
   try {
     const page = await browser.newPage();
 
@@ -707,72 +1023,200 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt }) {
     // Wait for sidebar to load
     await new Promise((r) => setTimeout(r, 2000));
 
-    // Step 1: Find and click the Gem by name in sidebar
-    // Try to click the gem - prioritize button.bot-new-conversation-button inside bot-list-item
+    // Step 1: Click "Explore Gems" button in sidebar first
+    const clickedExplore = await clickSelectors(page, [
+      'button[aria-label="Explore Gems"]',
+      'button[aria-label*="Explore Gems" i]',
+      '[aria-label="Explore Gems"]',
+    ], { timeoutMs: 10000 });
+    
+    if (!clickedExplore) {
+      const clickedByText = await clickByText(page, ['Explore Gems', 'Khám phá Gems'], { timeoutMs: 8000 });
+    }
+    
+    // Wait for Explore Gems page to load
+    await Promise.race([
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {}),
+      new Promise((r) => setTimeout(r, 1500)),
+    ]);
+    
+    // Wait a bit for bot-list-row elements to appear
+    await new Promise((r) => setTimeout(r, 1000));
+
+    // Step 2: Scroll down to load more gems (lazy loading)
+    await page.evaluate(async () => {
+      const containers = [
+        document.querySelector('div.bot-list-container'),
+        document.querySelector('div[class*="bot-list"]'),
+        document.querySelector('div.content-container'),
+        document.querySelector('bard-sidenav-content'),
+        document.querySelector('div[class*="scroll"]'),
+        document.querySelector('div[class*="list"]'),
+        document.querySelector('main'),
+        document.querySelector('div[role="main"]'),
+        document.body,
+      ];
+      
+      let scrollContainer = null;
+      for (const container of containers) {
+        if (container && container.scrollHeight > container.clientHeight) {
+          scrollContainer = container;
+          break;
+        }
+      }
+      
+      if (!scrollContainer) {
+        scrollContainer = document.body;
+      }
+      
+      const initialScrollTop = scrollContainer.scrollTop;
+      const initialBotListRowsCount = document.querySelectorAll('bot-list-row').length;
+      
+      let lastScrollTop = initialScrollTop;
+      let lastBotListRowsCount = initialBotListRowsCount;
+      let scrollAttempts = 0;
+      const maxScrollAttempts = 10;
+      
+      while (scrollAttempts < maxScrollAttempts) {
+        scrollContainer.scrollTop = scrollContainer.scrollHeight;
+        await new Promise((r) => setTimeout(r, 500));
+        
+        const afterScrollTop = scrollContainer.scrollTop;
+        const afterCount = document.querySelectorAll('bot-list-row').length;
+        
+        if (afterScrollTop === lastScrollTop && afterCount === lastBotListRowsCount) {
+          break;
+        }
+        
+        lastScrollTop = afterScrollTop;
+        lastBotListRowsCount = afterCount;
+        scrollAttempts++;
+      }
+    });
+    
+    await new Promise((r) => setTimeout(r, 500));
+
+    // Step 3: Find and click the Gem by name in bot-list-row elements
     const gemClicked = await page.evaluate((gemName) => {
       const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
       const targetName = norm(gemName);
       
-      // First, try to find button.bot-new-conversation-button (the actual clickable element)
-      const buttons = document.querySelectorAll('button.bot-new-conversation-button');
+      const extractGemName = (text) => {
+        const cleaned = text.replace(/^[a-zA-Z]\s+/, '').trim();
+        return cleaned;
+      };
       
-      for (const button of buttons) {
-        const text = norm(button.textContent || button.innerText || '');
+      const matchesTarget = (text, target) => {
+        const gemName = extractGemName(text);
+        if (gemName === target || text === target) {
+          return { match: true, type: 'exact' };
+        }
         
-        // Try exact match first
-        if (text === targetName) {
-          try {
-            button.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
-            button.focus();
-            button.click();
-            return { clicked: true, method: 'exact_match_button', text, element: 'button' };
-          } catch (e) {
-            // Continue to next item
+        const targetIndex = text.indexOf(target);
+        if (targetIndex !== -1) {
+          const afterTarget = text.substring(targetIndex + target.length);
+          if (afterTarget === '' || !/^[a-zA-Z0-9]/.test(afterTarget)) {
+            return { match: true, type: 'contains' };
           }
         }
         
-        // Try contains match (text includes targetName or targetName includes text)
-        if (text.includes(targetName) || targetName.includes(text)) {
+        const gemNameIndex = gemName.indexOf(target);
+        if (gemNameIndex !== -1) {
+          const afterTarget = gemName.substring(gemNameIndex + target.length);
+          if (afterTarget === '' || !/^[a-zA-Z0-9]/.test(afterTarget)) {
+            return { match: true, type: 'contains-extracted' };
+          }
+        }
+        
+        return { match: false };
+      };
+      
+      const botListRows = Array.from(document.querySelectorAll('bot-list-row'));
+      
+      // First pass: Try exact match
+      for (const row of botListRows) {
+        const text = norm(row.textContent || row.innerText || '');
+        const matchResult = matchesTarget(text, targetName);
+        
+        if (matchResult.match && matchResult.type === 'exact') {
           try {
-            button.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
-            button.focus();
-            button.click();
-            return { clicked: true, method: 'contains_match_button', text, element: 'button' };
+            const clickableButton = row.querySelector('button.bot-new-conversation-button');
+            if (clickableButton) {
+              clickableButton.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+              clickableButton.focus();
+              clickableButton.click();
+              return { clicked: true, method: 'bot-list-row-button-exact' };
+            }
+            
+            const link = row.querySelector('a');
+            if (link) {
+              link.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+              link.focus();
+              link.click();
+              return { clicked: true, method: 'bot-list-row-link-exact' };
+            }
+            
+            row.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+            row.focus();
+            row.click();
+            return { clicked: true, method: 'bot-list-row-direct-exact' };
           } catch (e) {
-            // Continue to next item
+            return { clicked: false, error: e.message };
           }
         }
       }
       
-      // Fallback: try bot-list-item itself
-      const botListItems = document.querySelectorAll('bot-list-item');
+      // Second pass: Try contains match
+      for (const row of botListRows) {
+        const text = norm(row.textContent || row.innerText || '');
+        const matchResult = matchesTarget(text, targetName);
+        
+        if (matchResult.match && matchResult.type !== 'exact') {
+          try {
+            const clickableButton = row.querySelector('button.bot-new-conversation-button');
+            if (clickableButton) {
+              clickableButton.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+              clickableButton.focus();
+              clickableButton.click();
+              return { clicked: true, method: `bot-list-row-button-${matchResult.type}` };
+            }
+            
+            const link = row.querySelector('a');
+            if (link) {
+              link.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+              link.focus();
+              link.click();
+              return { clicked: true, method: `bot-list-row-link-${matchResult.type}` };
+            }
+            
+            row.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+            row.focus();
+            row.click();
+            return { clicked: true, method: `bot-list-row-direct-${matchResult.type}` };
+          } catch (e) {
+            // Continue to next row
+          }
+        }
+      }
+      
+      // Fallback: try bot-list-item in sidebar
+      const botListItems = Array.from(document.querySelectorAll('bot-list-item'));
+      
       for (const item of botListItems) {
         const text = norm(item.textContent || item.innerText || '');
+        const matchResult = matchesTarget(text, targetName);
         
-        // Try to find button inside this bot-list-item
-        const innerButton = item.querySelector('button.bot-new-conversation-button');
-        if (innerButton) {
-          if (text === targetName || text.includes(targetName) || targetName.includes(text)) {
+        if (matchResult.match) {
+          const innerButton = item.querySelector('button.bot-new-conversation-button');
+          if (innerButton) {
             try {
               innerButton.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
               innerButton.focus();
               innerButton.click();
-              return { clicked: true, method: 'contains_match_inner_button', text, element: 'inner_button' };
+              return { clicked: true, method: `sidebar-bot-list-item-${matchResult.type}` };
             } catch (e) {
               // Continue
             }
-          }
-        }
-        
-        // Last resort: click the bot-list-item itself
-        if (text === targetName || text.includes(targetName) || targetName.includes(text)) {
-          try {
-            item.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
-            item.focus();
-            item.click();
-            return { clicked: true, method: 'contains_match_item', text, element: 'bot-list-item' };
-          } catch (e) {
-            // Continue
           }
         }
       }
@@ -782,15 +1226,159 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt }) {
     
     // Wait a bit after clicking
     if (gemClicked && gemClicked.clicked) {
-      await new Promise((r) => setTimeout(r, 300));
+      await new Promise((r) => setTimeout(r, 500));
     }
 
     if (!gemClicked || !gemClicked.clicked) {
-      // Fallback: try clicking by text using helper function
-      const clicked = await clickByText(page, [gem], { timeoutMs: 5000 });
-      if (!clicked) {
-        status = 'gem_not_found';
-        return { status, error: `Gem "${gem}" not found in sidebar` };
+      // Fallback 1: Scroll more and try again
+      await page.evaluate(async () => {
+        const containers = [
+          document.querySelector('div.bot-list-container'),
+          document.querySelector('div[class*="bot-list"]'),
+          document.querySelector('div.content-container'),
+          document.querySelector('bard-sidenav-content'),
+          document.querySelector('div[class*="scroll"]'),
+          document.querySelector('div[class*="list"]'),
+          document.querySelector('main'),
+          document.querySelector('div[role="main"]'),
+          document.body,
+        ];
+        
+        let scrollContainer = null;
+        for (const container of containers) {
+          if (container && container.scrollHeight > container.clientHeight) {
+            scrollContainer = container;
+            break;
+          }
+        }
+        
+        if (!scrollContainer) {
+          scrollContainer = document.body;
+        }
+        
+        for (let i = 0; i < 5; i++) {
+          scrollContainer.scrollTop = scrollContainer.scrollHeight;
+          await new Promise((r) => setTimeout(r, 300));
+        }
+      });
+      
+      await new Promise((r) => setTimeout(r, 500));
+      
+      // Retry finding gem
+      const gemClickedRetry = await page.evaluate((gemName) => {
+        const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+        const targetName = norm(gemName);
+        
+        const extractGemName = (text) => {
+          const cleaned = text.replace(/^[a-zA-Z]\s+/, '').trim();
+          return cleaned;
+        };
+        
+        const matchesTarget = (text, target) => {
+          const gemName = extractGemName(text);
+          if (gemName === target || text === target) {
+            return { match: true, type: 'exact' };
+          }
+          
+          const targetIndex = text.indexOf(target);
+          if (targetIndex !== -1) {
+            const afterTarget = text.substring(targetIndex + target.length);
+            if (afterTarget === '' || !/^[a-zA-Z0-9]/.test(afterTarget)) {
+              return { match: true, type: 'contains' };
+            }
+          }
+          
+          const gemNameIndex = gemName.indexOf(target);
+          if (gemNameIndex !== -1) {
+            const afterTarget = gemName.substring(gemNameIndex + target.length);
+            if (afterTarget === '' || !/^[a-zA-Z0-9]/.test(afterTarget)) {
+              return { match: true, type: 'contains-extracted' };
+            }
+          }
+          
+          return { match: false };
+        };
+        
+        const botListRows = Array.from(document.querySelectorAll('bot-list-row'));
+        
+        // First pass: exact match
+        for (const row of botListRows) {
+          const text = norm(row.textContent || row.innerText || '');
+          const matchResult = matchesTarget(text, targetName);
+          
+          if (matchResult.match && matchResult.type === 'exact') {
+            try {
+              const clickableButton = row.querySelector('button.bot-new-conversation-button');
+              if (clickableButton) {
+                clickableButton.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+                clickableButton.focus();
+                clickableButton.click();
+                return { clicked: true, method: 'bot-list-row-button-exact-retry' };
+              }
+              
+              const link = row.querySelector('a');
+              if (link) {
+                link.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+                link.focus();
+                link.click();
+                return { clicked: true, method: 'bot-list-row-link-exact-retry' };
+              }
+              
+              row.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+              row.focus();
+              row.click();
+              return { clicked: true, method: 'bot-list-row-direct-exact-retry' };
+            } catch (e) {
+              return { clicked: false, error: e.message };
+            }
+          }
+        }
+        
+        // Second pass: contains match
+        for (const row of botListRows) {
+          const text = norm(row.textContent || row.innerText || '');
+          const matchResult = matchesTarget(text, targetName);
+          
+          if (matchResult.match && matchResult.type !== 'exact') {
+            try {
+              const clickableButton = row.querySelector('button.bot-new-conversation-button');
+              if (clickableButton) {
+                clickableButton.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+                clickableButton.focus();
+                clickableButton.click();
+                return { clicked: true, method: `bot-list-row-button-${matchResult.type}-retry` };
+              }
+              
+              const link = row.querySelector('a');
+              if (link) {
+                link.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+                link.focus();
+                link.click();
+                return { clicked: true, method: `bot-list-row-link-${matchResult.type}-retry` };
+              }
+              
+              row.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+              row.focus();
+              row.click();
+              return { clicked: true, method: `bot-list-row-direct-${matchResult.type}-retry` };
+            } catch (e) {
+              // Continue
+            }
+          }
+        }
+        
+        return { clicked: false };
+      }, gem);
+      
+      if (gemClickedRetry && gemClickedRetry.clicked) {
+        await new Promise((r) => setTimeout(r, 500));
+      } else {
+        // Fallback 2: try clicking by text using helper function
+        const clicked = await clickByText(page, [gem], { timeoutMs: 5000 });
+        if (!clicked) {
+          status = 'gem_not_found';
+          return { status, error: `Gem "${gem}" not found in bot-list-row or sidebar` };
+        }
       }
     }
 
@@ -808,6 +1396,10 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt }) {
       });
       
       if (filesExist.length > 0) {
+        if (onProgress) {
+          onProgress('file_uploading', 'Đang upload file lên Gemini', { file_count: filesExist.length });
+        }
+        
         try {
           // Scroll to bottom to ensure input area is visible
           await page.evaluate(() => {
@@ -818,11 +1410,17 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt }) {
           // Upload files via file chooser (click button to trigger file chooser)
           const uploaded = await uploadFilesViaFileChooser(page, filesExist);
           if (uploaded) {
+            if (onProgress) {
+              onProgress('file_uploaded', 'Đã upload file thành công', { file_count: filesExist.length });
+            }
             await new Promise((r) => setTimeout(r, 2000));
           } else {
             // Fallback: try uploadKnowledgeFiles (for Knowledge section)
             const uploaded2 = await uploadKnowledgeFiles(page, filesExist);
             if (uploaded2) {
+              if (onProgress) {
+                onProgress('file_uploaded', 'Đã upload file thành công', { file_count: filesExist.length });
+              }
               await new Promise((r) => setTimeout(r, 2000));
             }
           }
@@ -831,6 +1429,9 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt }) {
           try {
             const uploaded = await uploadKnowledgeFiles(page, filesExist);
             if (uploaded) {
+              if (onProgress) {
+                onProgress('file_uploaded', 'Đã upload file thành công', { file_count: filesExist.length });
+              }
               await new Promise((r) => setTimeout(r, 2000));
             }
           } catch (e2) {
@@ -875,6 +1476,9 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt }) {
           const { response } = event;
           if (response.url.includes('StreamGenerate') && response.status === 200) {
             targetRequestId = event.requestId;
+            if (onProgress) {
+              onProgress('gemini_generating', 'Đã gửi prompt, đang chờ Gemini tạo kịch bản', {});
+            }
           }
         });
         
@@ -918,12 +1522,133 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt }) {
         await new Promise((r) => setTimeout(r, 500));
       }
 
-      // Step 6: Wait for StreamGenerate response to finish, then scroll and click copy-button
+      // Step 6: Wait for StreamGenerate response to finish, then extract text and handle continue loop
       if (responseFinishedPromise) {
         try {
-          // Wait for Network.loadingFinished event (indicates response is complete)
-          // No timeout - wait until response actually finishes
-          await responseFinishedPromise;
+          const allTextParts = [];
+          let currentIteration = 0;
+          const maxIterations = 10;
+          let needsContinue = true;
+          
+          while (needsContinue && currentIteration < maxIterations) {
+            // Wait for Network.loadingFinished event (indicates response is complete)
+            await responseFinishedPromise;
+            
+            // Clean up CDP for current response
+            if (cdpSession) {
+              try {
+                await cdpSession.send('Network.disable').catch(() => {});
+              } catch (e) {
+                // Ignore cleanup errors
+              }
+            }
+            
+            // Wait a bit more for response to fully render in DOM
+            await new Promise((r) => setTimeout(r, 2000));
+            
+            // Scroll xuống cuối để đảm bảo response mới đã render
+            await page.evaluate(() => {
+              window.scrollTo(0, document.body.scrollHeight);
+            });
+            await new Promise((r) => setTimeout(r, 500));
+            
+            // Extract text from Gemini (sẽ tìm copy-button cuối cùng)
+            const extractResult = await extractTextFromGemini(page, browser, userDataDir);
+            
+            if (!extractResult.success || !extractResult.text) {
+              break;
+            }
+            
+            const currentText = extractResult.text;
+            
+            // Check if text contains "Còn tiếp"
+            if (hasContinueText(currentText)) {
+              // Xóa text "Còn tiếp" trước khi lưu
+              const cleanedText = removeContinueText(currentText);
+              allTextParts.push(cleanedText);
+              
+              if (onProgress) {
+                onProgress('gemini_continue', `Đã lấy phần ${currentIteration + 1}, đang tiếp tục...`, {
+                  iteration: currentIteration + 1,
+                  accumulated_length: allTextParts.join('\n\n').length
+                });
+              }
+              
+              // Gửi "continue" prompt
+              const continueResult = await sendContinuePrompt(page, onProgress);
+              
+              if (!continueResult.success) {
+                break;
+              }
+              
+              // Setup CDP cho response mới
+              responseFinishedPromise = new Promise((resolve) => {
+                const client = page._client();
+                cdpSession = client;
+                
+                client.send('Network.enable').catch(() => {});
+                
+                let targetRequestId = null;
+                
+                client.on('Network.responseReceived', (event) => {
+                  const { response } = event;
+                  if (response.url.includes('StreamGenerate') && response.status === 200) {
+                    targetRequestId = event.requestId;
+                  }
+                });
+                
+                client.on('Network.loadingFinished', (event) => {
+                  if (event.requestId === targetRequestId && targetRequestId) {
+                    resolve(true);
+                  }
+                });
+              });
+              
+              currentIteration++;
+            } else {
+              // Không còn "Còn tiếp", gộp tất cả text
+              // Xóa text "Còn tiếp" nếu có (để chắc chắn)
+              const cleanedText = removeContinueText(currentText);
+              allTextParts.push(cleanedText);
+              let finalText = allTextParts.join('\n\n');
+              // Xóa text "Còn tiếp" một lần nữa để chắc chắn
+              finalText = removeContinueText(finalText);
+              
+              if (onProgress) {
+                onProgress('gemini_completed', 'Gemini đã tạo kịch bản xong', {});
+              }
+              
+              // Gửi text hoàn chỉnh lên server
+              if (onProgress) {
+                onProgress('text_copied', 'Đã copy toàn bộ text từ Gemini', {
+                  text: finalText,
+                  text_length: finalText.length,
+                  parts_count: allTextParts.length
+                });
+              }
+              
+              copiedText = finalText;
+              needsContinue = false;
+            }
+          }
+          
+          // Nếu vượt quá maxIterations, gộp text hiện có
+          if (needsContinue && currentIteration >= maxIterations) {
+            if (allTextParts.length > 0) {
+              let finalText = allTextParts.join('\n\n');
+              // Xóa text "Còn tiếp" một lần nữa để chắc chắn
+              finalText = removeContinueText(finalText);
+              copiedText = finalText;
+              
+              if (onProgress) {
+                onProgress('text_copied', 'Đã copy text từ Gemini (đạt giới hạn iterations)', {
+                  text: finalText,
+                  text_length: finalText.length,
+                  parts_count: allTextParts.length
+                });
+              }
+            }
+          }
           
           // Clean up CDP
           if (cdpSession) {
@@ -931,62 +1656,6 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt }) {
               await cdpSession.send('Network.disable').catch(() => {});
             } catch (e) {
               // Ignore cleanup errors
-            }
-          }
-          
-          // Wait a bit more for response to fully render in DOM
-          await new Promise((r) => setTimeout(r, 2000));
-          
-          // Find and click copy-button directly (it should be in DOM already)
-          let copyButton = await page.$('copy-button');
-          if (copyButton) {
-            try {
-              // Try to find the actual button element inside copy-button
-              let innerButton = await copyButton.$('button');
-              if (!innerButton) {
-                innerButton = await copyButton.$('[role="button"]');
-              }
-              if (!innerButton) {
-                innerButton = copyButton;
-              }
-              
-              if (innerButton) {
-                await innerButton.evaluate((el) => el.scrollIntoView({ block: 'center', behavior: 'smooth' }));
-                await new Promise((r) => setTimeout(r, 300));
-                await innerButton.focus();
-                await innerButton.click({ timeout: 2000 });
-                await new Promise((r) => setTimeout(r, 1000));
-              } else {
-                // Fallback: click copy-button directly
-                await copyButton.evaluate((el) => el.scrollIntoView({ block: 'center', behavior: 'smooth' }));
-                await new Promise((r) => setTimeout(r, 300));
-                await copyButton.focus();
-                await copyButton.click({ timeout: 2000 });
-                await new Promise((r) => setTimeout(r, 1000));
-              }
-            } catch (clickErr) {
-              // Fallback: try clicking using evaluate
-              const clicked = await page.evaluate(() => {
-                const copyButton = document.querySelector('copy-button');
-                if (copyButton) {
-                  const innerButton = copyButton.querySelector('button') || 
-                                     copyButton.querySelector('[role="button"]') ||
-                                     copyButton;
-                  try {
-                    innerButton.scrollIntoView({ block: 'center', behavior: 'smooth' });
-                    innerButton.focus();
-                    innerButton.click();
-                    return true;
-                  } catch (e) {
-                    return false;
-                  }
-                }
-                return false;
-              });
-              
-              if (clicked) {
-                await new Promise((r) => setTimeout(r, 1000));
-              }
             }
           }
         } catch (e) {
@@ -1003,7 +1672,7 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt }) {
     }
 
     status = 'success';
-    return { status };
+    return { status, copiedText: copiedText || null };
   } catch (e) {
     return { status: 'failed', error: e?.message || String(e) };
   } finally {

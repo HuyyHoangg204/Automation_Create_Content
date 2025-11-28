@@ -59,42 +59,8 @@ const launchSchema = z.object({
   path: ['name'],
 });
 
-// Trong POST /chrome/profiles/launch
 router.post('/profiles/launch', validateBody(launchSchema), async (req, res, next) => {
-  const requestStartTime = Date.now();
   try {
-    // Log chi tiết request để so sánh giữa server và Swagger
-    const fullUrl = `${req.protocol}://${req.get('host')}${req.originalUrl || req.url}`;
-    logger.info({
-      method: req.method,
-      url: req.url,
-      originalUrl: req.originalUrl,
-      fullUrl: fullUrl,
-      path: req.path,
-      query: req.query,
-      params: req.params,
-      headers: {
-        'user-agent': req.headers['user-agent'],
-        'content-type': req.headers['content-type'],
-        'content-length': req.headers['content-length'],
-        'x-entity-type': req.headers['x-entity-type'],
-        'x-entity-id': req.headers['x-entity-id'],
-        'x-user-id': req.headers['x-user-id'],
-        'host': req.headers['host'],
-        'x-forwarded-for': req.headers['x-forwarded-for'],
-        'x-forwarded-host': req.headers['x-forwarded-host'],
-        'x-forwarded-proto': req.headers['x-forwarded-proto'],
-      },
-      body: req.body,
-      bodyStringified: JSON.stringify(req.body),
-      validatedBody: req.validatedBody,
-      validatedBodyStringified: JSON.stringify(req.validatedBody),
-      ip: req.ip,
-      remoteAddress: req.connection?.remoteAddress || req.socket?.remoteAddress,
-      remotePort: req.connection?.remotePort || req.socket?.remotePort,
-      requestStartTime: new Date(requestStartTime).toISOString(),
-    }, '[Chrome] POST /profiles/launch - Request details');
-    
     const { name, userDataDir: inputUserDataDir, profileDirName } = req.validatedBody;
     
     // Auto-resolve userDataDir từ tên folder (hỗ trợ các máy khác nhau với user khác nhau)
@@ -134,20 +100,7 @@ router.post('/profiles/launch', validateBody(launchSchema), async (req, res, nex
       userDataDir: resolvedUserDataDir
     };
     
-    const launchStartTime = Date.now();
     const result = await launchChromeProfile(launchParams);
-    const launchDuration = Date.now() - launchStartTime;
-    
-    logger.info({
-      name,
-      userDataDir: resolvedUserDataDir,
-      profileDirName,
-      pid: result.pid,
-      debugPort: result.launchArgs?.find(a => a.includes('--remote-debugging-port'))?.split('=')[1],
-      gmailStatus: result.gmailCheckStatus,
-      launchDuration,
-      requestDuration: Date.now() - requestStartTime,
-    }, '[Chrome] POST /profiles/launch - Launch completed');
     
     // Log: Chrome launched
     await logService.logSuccess('topic', entityID, userID, 'chrome_launched',
