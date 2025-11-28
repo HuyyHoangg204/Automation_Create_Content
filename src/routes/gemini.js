@@ -8,6 +8,7 @@ const { downloadFiles } = require('../utils/downloadFile');
 const { createGem } = require('../scripts/gemini');
 const { listGems } = require('../scripts/listGems');
 const { sendPrompt } = require('../scripts/sendPrompt');
+const { launchNotebookLM } = require('../scripts/notebooklm');
 const logService = require('../services/logService');
 const entityContextService = require('../services/entityContext');
 
@@ -35,7 +36,7 @@ router.post('/gems', async (req, res, next) => {
     }
     
     const { name, userDataDir: inputUserDataDir, profileDirName, gemName, description, instructions, knowledgeFiles, debugPort } = parsed.data;
-    
+
     // Extract entity info
     const entityID = req.headers['x-entity-id'] || req.body.entity_id || 'unknown';
     const userID = req.headers['x-user-id'] || req.body.user_id || 'unknown';
@@ -305,6 +306,265 @@ router.post('/gems/send-prompt', async (req, res, next) => {
     const out = await sendPrompt({ userDataDir, debugPort, gem, listFile, prompt });
     return res.json(out);
   } catch (err) {
+    return next(err);
+  }
+});
+
+const generateOutlineSchema = z.object({
+  name: z.string().min(1).optional(),
+  userDataDir: z.string().min(1).optional(),
+  profileDirName: z.string().min(1).optional().default('Default'),
+  debugPort: z.number().int().positive().optional(),
+  gem: z.string().min(1),
+  notebooklmPrompt: z.string().min(1),
+  website: z.array(z.string().url()).optional(),
+  youtube: z.array(z.string().url()).optional(),
+  textContent: z.string().optional(),
+  sendPromptText: z.string().optional(),
+}).refine((d) => !!d.name || !!d.userDataDir, {
+  message: 'Either name or userDataDir must be provided',
+  path: ['name'],
+});
+
+router.post('/generate-outline-and-upload', async (req, res, next) => {
+  try {
+    const parsed = generateOutlineSchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'ValidationError', details: parsed.error.issues });
+    }
+    
+    const { 
+      name, 
+      userDataDir: inputUserDataDir, 
+      profileDirName, 
+      debugPort, 
+      gem, 
+      notebooklmPrompt,
+      website,
+      youtube,
+      textContent,
+      sendPromptText
+    } = parsed.data;
+    
+    const userDataDir = await resolveUserDataDir({
+      userDataDir: inputUserDataDir,
+      name,
+      profileDirName
+    });
+
+    const contextKey = profileDirName || userDataDir;
+    const savedContext = entityContextService.get(contextKey);
+    
+    let finalEntityType = 'topic';
+    let finalEntityID = 'unknown';
+    let finalUserID = 'unknown';
+    
+    if (savedContext) {
+      finalEntityType = savedContext.entityType || 'topic';
+      finalEntityID = savedContext.entityID || 'unknown';
+      finalUserID = savedContext.userID || 'unknown';
+    } else {
+      finalEntityType = req.headers['x-entity-type'] || req.body.entity_type || 'topic';
+      finalEntityID = req.headers['x-entity-id'] || req.body.entity_id || 'unknown';
+      finalUserID = req.headers['x-user-id'] || req.body.user_id || 'unknown';
+    }
+    
+    await logService.logInfo(finalEntityType, finalEntityID, finalUserID, 'outline_generation_started',
+      'Bắt đầu tạo dàn ý bằng NotebookLM', {
+        gem_name: gem,
+        has_website: !!(website && website.length > 0),
+        has_youtube: !!(youtube && youtube.length > 0),
+        has_text_content: !!textContent
+      });
+    
+    const outlinesDir = path.join(userDataDir, 'outlines');
+    if (!fs.existsSync(outlinesDir)) {
+      fs.mkdirSync(outlinesDir, { recursive: true });
+    }
+    
+    const timestamp = Date.now();
+    const outlineFileName = `outline_${timestamp}.txt`;
+    const outlineFilePath = path.join(outlinesDir, outlineFileName);
+    
+    await logService.logInfo(finalEntityType, finalEntityID, finalUserID, 'notebooklm_running',
+      'Đang chạy NotebookLM để tạo dàn ý', {
+        gem_name: gem,
+        outline_file: outlineFileName
+      });
+    
+    const notebooklmResult = await launchNotebookLM({
+      userDataDir,
+      debugPort,
+      website,
+      youtube,
+      textContent,
+      prompt: notebooklmPrompt,
+      outputFile: outlineFilePath
+    });
+    
+    if (notebooklmResult.status === 'not_logged_in') {
+      await logService.logError(finalEntityType, finalEntityID, finalUserID, 'notebooklm_not_logged_in',
+        'Người dùng chưa đăng nhập NotebookLM', {
+          gem_name: gem
+        });
+      return res.json({ 
+        status: 'notebooklm_not_logged_in',
+        error: 'User not logged in to NotebookLM'
+      });
+    }
+    
+    if (notebooklmResult.status === 'failed') {
+      await logService.logError(finalEntityType, finalEntityID, finalUserID, 'notebooklm_failed',
+        `NotebookLM tạo dàn ý thất bại: ${notebooklmResult.error || 'Unknown error'}`, {
+          gem_name: gem,
+          error: notebooklmResult.error || 'Failed to generate outline'
+        });
+      return res.json({ 
+        status: 'notebooklm_failed',
+        error: notebooklmResult.error || 'Failed to generate outline'
+      });
+    }
+    
+    if (!fs.existsSync(outlineFilePath)) {
+      await logService.logError(finalEntityType, finalEntityID, finalUserID, 'outline_file_not_created',
+        'File dàn ý không được tạo bởi NotebookLM', {
+          gem_name: gem,
+          expected_file: outlineFilePath
+        });
+      return res.json({ 
+        status: 'outline_file_not_created',
+        error: 'Outline file was not created by NotebookLM'
+      });
+    }
+    
+    await logService.logSuccess(finalEntityType, finalEntityID, finalUserID, 'outline_generated',
+      'Đã tạo dàn ý thành công từ NotebookLM', {
+        gem_name: gem,
+        outline_file: outlineFileName
+      });
+    
+    await logService.logInfo(finalEntityType, finalEntityID, finalUserID, 'uploading_to_gemini',
+      'Đang upload dàn ý lên Gemini', {
+        gem_name: gem,
+        outline_file: outlineFileName
+      });
+    
+    const sendPromptResult = await sendPrompt({
+      userDataDir,
+      debugPort,
+      gem,
+      listFile: [outlineFilePath],
+      prompt: sendPromptText || 'Đây là dàn ý đã được tạo, hãy phân tích và tạo nội dung chi tiết dựa trên dàn ý này.',
+      onProgress: async (stage, message, metadata) => {
+        if (stage === 'text_copied' && metadata && metadata.text) {
+          await logService.logInfo(finalEntityType, finalEntityID, finalUserID, 'text_copied',
+            'Đã copy text từ Gemini', {
+              gem_name: gem,
+              text_length: metadata.text_length || 0,
+              text: metadata.text
+            });
+        } else if (stage === 'gemini_generating') {
+          await logService.logInfo(finalEntityType, finalEntityID, finalUserID, 'gemini_generating',
+            message || 'Đang chờ Gemini tạo kịch bản', {
+              gem_name: gem
+            });
+        } else if (stage === 'gemini_completed') {
+          await logService.logSuccess(finalEntityType, finalEntityID, finalUserID, 'gemini_completed',
+            message || 'Gemini đã tạo kịch bản xong', {
+              gem_name: gem
+            });
+        } else if (stage === 'file_uploading') {
+          await logService.logInfo(finalEntityType, finalEntityID, finalUserID, 'file_uploading',
+            message || 'Đang upload file', {
+              gem_name: gem,
+              file_count: metadata?.file_count || 0
+            });
+        } else if (stage === 'file_uploaded') {
+          await logService.logSuccess(finalEntityType, finalEntityID, finalUserID, 'file_uploaded',
+            message || 'Đã upload file thành công', {
+              gem_name: gem,
+              file_count: metadata?.file_count || 0
+            });
+        }
+      }
+    });
+    
+    if (sendPromptResult.status === 'success' || sendPromptResult.status === 'prompt_sent') {
+      await logService.logSuccess(finalEntityType, finalEntityID, finalUserID, 'outline_uploaded',
+        'Đã upload dàn ý lên Gemini thành công', {
+          gem_name: gem,
+          outline_file: outlineFileName
+        });
+      
+      // Log text copied if available (gửi toàn bộ text để backend cloud forward lên FE)
+      if (sendPromptResult.copiedText) {
+        await logService.logInfo(finalEntityType, finalEntityID, finalUserID, 'text_copied_final',
+          'Text đã được copy từ Gemini', {
+            gem_name: gem,
+            text_length: sendPromptResult.copiedText.length,
+            text: sendPromptResult.copiedText
+          });
+      }
+      
+      await logService.logSuccess(finalEntityType, finalEntityID, finalUserID, 'generate_outline_completed',
+        'Toàn bộ quá trình tạo và upload dàn ý hoàn thành', {
+          gem_name: gem,
+          outline_file: outlineFileName
+        });
+    } else {
+      await logService.logWarning(finalEntityType, finalEntityID, finalUserID, 'outline_upload_failed',
+        `Upload dàn ý lên Gemini không thành công: ${sendPromptResult.status}`, {
+          gem_name: gem,
+          outline_file: outlineFileName,
+          status: sendPromptResult.status,
+          error: sendPromptResult.error || undefined
+        });
+    }
+    
+    // Xóa file outline sau khi hoàn thành (thành công hoặc thất bại) để tránh tích lũy
+    if (fs.existsSync(outlineFilePath)) {
+      try {
+        fs.unlinkSync(outlineFilePath);
+      } catch (unlinkErr) {
+        // Ignore error khi xóa file
+      }
+    }
+    
+    return res.json({
+      status: 'success',
+      notebooklm: notebooklmResult,
+      sendPrompt: sendPromptResult,
+      outlineFile: outlineFilePath,
+      copiedText: sendPromptResult.copiedText || null
+    });
+  } catch (err) {
+    const { name: errorName, userDataDir: errorUserDataDir, profileDirName: errorProfileDirName } = req.body || {};
+    let errorContextKey = null;
+    let errorContext = null;
+    
+    try {
+      const errorResolvedUserDataDir = await resolveUserDataDir({
+        userDataDir: errorUserDataDir,
+        name: errorName,
+        profileDirName: errorProfileDirName
+      });
+      errorContextKey = errorProfileDirName || errorResolvedUserDataDir;
+      errorContext = entityContextService.get(errorContextKey);
+    } catch (_) {
+      // Ignore
+    }
+    
+    const errorEntityType = errorContext?.entityType || req.headers['x-entity-type'] || req.body.entity_type || 'topic';
+    const errorEntityID = errorContext?.entityID || req.headers['x-entity-id'] || req.body.entity_id || 'unknown';
+    const errorUserID = errorContext?.userID || req.headers['x-user-id'] || req.body.user_id || 'unknown';
+    
+    await logService.logError(errorEntityType, errorEntityID, errorUserID, 'generate_outline_failed',
+      `Lỗi khi tạo và upload dàn ý: ${err.message}`, { 
+        error: err.message,
+        gem_name: req.body?.gem || 'unknown'
+      });
+    
+    logger.error({ err }, '[Gemini] Error in generate-outline-and-upload');
     return next(err);
   }
 });

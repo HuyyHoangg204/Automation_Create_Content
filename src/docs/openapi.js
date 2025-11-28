@@ -414,6 +414,71 @@ const openapi = {
         },
       },
     },
+    '/gemini/generate-outline-and-upload': {
+      post: {
+        summary: 'Generate outline using NotebookLM and upload to Gemini',
+        tags: ['gemini'],
+        description: 'Kết hợp NotebookLM và Gemini: tạo dàn ý bằng NotebookLM, lưu vào folder outlines trong profile, sau đó upload file dàn ý lên Gemini Gem và gửi prompt.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  name: { type: 'string', description: 'Profile name to use (alternative to userDataDir)' },
+                  userDataDir: { type: 'string', description: 'Profile user-data-dir (alternative to name)' },
+                  profileDirName: { type: 'string', description: 'Profile directory name (default: "Default")' },
+                  debugPort: { type: 'integer', description: 'Optional DevTools port if not default' },
+                  gem: { type: 'string', description: 'Tên Gem trong Gemini để upload dàn ý (required)' },
+                  notebooklmPrompt: { type: 'string', description: 'Prompt để gửi cho NotebookLM tạo dàn ý (required)' },
+                  website: { type: 'array', items: { type: 'string', format: 'url' }, description: 'Array website URLs làm source cho NotebookLM' },
+                  youtube: { type: 'array', items: { type: 'string', format: 'url' }, description: 'Array YouTube URLs làm source cho NotebookLM' },
+                  textContent: { type: 'string', description: 'Text content làm source cho NotebookLM' },
+                  sendPromptText: { type: 'string', description: 'Prompt để gửi kèm file dàn ý lên Gemini (default: "Đây là dàn ý đã được tạo, hãy phân tích và tạo nội dung chi tiết dựa trên dàn ý này.")' },
+                },
+                required: ['gem', 'notebooklmPrompt'],
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: 'OK',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    status: { type: 'string', enum: ['success', 'notebooklm_not_logged_in', 'notebooklm_failed', 'outline_file_not_created'], description: 'Status của toàn bộ flow' },
+                    notebooklm: {
+                      type: 'object',
+                      properties: {
+                        status: { type: 'string', enum: ['launched', 'notebook_created', 'not_logged_in', 'failed', 'unknown'] },
+                        url: { type: 'string' },
+                        error: { type: 'string' },
+                      },
+                    },
+                    sendPrompt: {
+                      type: 'object',
+                      properties: {
+                        status: { type: 'string', enum: ['success', 'failed', 'not_logged_in', 'gem_not_found'] },
+                        error: { type: 'string' },
+                      },
+                    },
+                    outlineFile: { type: 'string', description: 'Đường dẫn file dàn ý đã tạo: {userDataDir}/outlines/outline_{timestamp}.txt' },
+                    error: { type: 'string', description: 'Error message nếu có lỗi' },
+                  },
+                  required: ['status'],
+                },
+              },
+            },
+          },
+          400: { description: 'Bad Request - validation error' },
+          404: { description: 'Profile not found' },
+        },
+      },
+    },
     '/notebooklm/launch': {
       post: {
         summary: 'Launch NotebookLM page in Chrome profile and handle welcome popup',
