@@ -17,6 +17,15 @@ class ProfileStatusEventEmitter extends EventEmitter {
   emitAllStatus() {
     this.emit('get-all-status');
   }
+
+  emitAutomationStatusChange(profileKey, automationStatus, data = {}) {
+    this.emit('automation-status-change', {
+      profileKey,
+      automationStatus,
+      ...data,
+      timestamp: Date.now()
+    });
+  }
 }
 
 const profileStatusEvent = new ProfileStatusEventEmitter();

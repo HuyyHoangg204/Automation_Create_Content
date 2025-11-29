@@ -82,7 +82,7 @@ let eventSource = null
 const statusMap = ref({})
 
 function getProfileKey(profile) {
-  return profile.profileDirName || profile.userDataDir
+  return profile.dirName || profile.name || profile.userDataDir
 }
 
 function connectStatusStream() {
@@ -178,7 +178,8 @@ async function loadProfiles() {
           id: p.id,
           name: p.name,
           userDataDir: p.userDataDir,
-          profileDirName: p.profileDirName,
+          profileDirName: p.dirName || p.name,
+          dirName: p.dirName || p.name,
           createdAt: p.createdAt,
           updatedAt: p.updatedAt,
           actionStatus: status?.running ? 'running' : 'stopped'
@@ -221,7 +222,7 @@ async function handleProfileAction(profile) {
       const result = await ProfileAPI.stop({
         name: profile.name,
         userDataDir: profile.userDataDir,
-        profileDirName: profile.profileDirName,
+        profileDirName: profile.dirName || profile.name,
       })
       
       if (result) {
@@ -248,7 +249,7 @@ async function handleProfileAction(profile) {
       const result = await ProfileAPI.launch({
         name: profile.name,
         userDataDir: profile.userDataDir,
-        profileDirName: profile.profileDirName,
+        profileDirName: profile.dirName || profile.name,
         extraArgs: ['--start-maximized'],
       })
       
