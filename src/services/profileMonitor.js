@@ -30,6 +30,7 @@ class ProfileMonitorService {
           entityType: info.entityType,
           entityID: info.entityID,
           userID: info.userID,
+          automationStatus: info.automationStatus || 'idle',
           startTime: info.startTime
         });
       }
@@ -98,6 +99,7 @@ class ProfileMonitorService {
         entityID: entityID || 'unknown',
         userID: userID || 'unknown',
         status: 'running',
+        automationStatus: 'idle',
         startTime: Date.now()
       };
 
@@ -172,12 +174,18 @@ class ProfileMonitorService {
       return { monitored: false };
     }
 
-    return {
+    const status = {
       monitored: true,
       status: monitorInfo.status,
+      automationStatus: monitorInfo.automationStatus || 'idle',
       startTime: monitorInfo.startTime,
-      uptime: Date.now() - monitorInfo.startTime
+      uptime: Date.now() - monitorInfo.startTime,
+      userID: monitorInfo.userID || 'unknown',
+      entityID: monitorInfo.entityID || 'unknown',
+      entityType: monitorInfo.entityType || 'topic'
     };
+    
+    return status;
   }
 
   getAllMonitoredProfiles() {
@@ -188,8 +196,13 @@ class ProfileMonitorService {
         userDataDir: info.userDataDir,
         profileDirName: info.profileDirName,
         status: info.status,
+        automationStatus: info.automationStatus || 'idle',
+        port: info.port,
         startTime: info.startTime,
-        uptime: Date.now() - info.startTime
+        uptime: Date.now() - info.startTime,
+        userID: info.userID || 'unknown',
+        entityID: info.entityID || 'unknown',
+        entityType: info.entityType || 'topic'
       });
     }
     return profiles;
@@ -247,6 +260,7 @@ class ProfileMonitorService {
           entityID: savedProfile.entityID || 'unknown',
           userID: savedProfile.userID || 'unknown',
           status: 'running',
+          automationStatus: savedProfile.automationStatus || 'idle',
           startTime: savedProfile.startTime || Date.now()
         };
 
@@ -280,6 +294,29 @@ class ProfileMonitorService {
         await this.removeFromMonitorState(savedProfile.key);
       }
     }
+  }
+
+  setAutomationStatus(userDataDir, profileDirName, automationStatus) {
+    const key = profileDirName || userDataDir;
+    const monitorInfo = this.monitoredProfiles.get(key);
+    
+    if (!monitorInfo) {
+      return false;
+    }
+
+    monitorInfo.automationStatus = automationStatus;
+    return true;
+  }
+
+  getAutomationStatus(userDataDir, profileDirName) {
+    const key = profileDirName || userDataDir;
+    const monitorInfo = this.monitoredProfiles.get(key);
+    
+    if (!monitorInfo) {
+      return null;
+    }
+
+    return monitorInfo.automationStatus || 'idle';
   }
 }
 

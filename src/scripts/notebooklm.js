@@ -19,7 +19,47 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
   const { browser } = await connectToBrowserByUserDataDir(userDataDir, debugPort);
   let status = 'unknown';
   try {
-    const page = await browser.newPage();
+    // Đóng các tab cũ để tránh quá nhiều tab (giữ lại 1 tab để browser không đóng)
+    let page = null;
+    try {
+      const pages = await browser.pages();
+      if (pages.length > 1) {
+        // Đóng các tab từ sau về trước, giữ lại tab đầu tiên (index 0)
+        for (let i = pages.length - 1; i > 0; i--) {
+          try {
+            if (!pages[i].isClosed()) {
+              await pages[i].close();
+            }
+          } catch (closeError) {
+            // Ignore errors when closing pages (might already be closed)
+            logger.debug({ err: closeError }, 'notebooklm: error closing existing page');
+          }
+        }
+        // Đợi một chút để các tab đóng xong
+        await new Promise((r) => setTimeout(r, 300));
+      }
+      
+      // Lấy lại danh sách pages sau khi đóng
+      const remainingPages = await browser.pages();
+      if (remainingPages.length > 0 && !remainingPages[0].isClosed()) {
+        // Dùng tab còn lại
+        page = remainingPages[0];
+      } else {
+        // Tạo tab mới nếu không còn tab nào
+        page = await browser.newPage();
+      }
+    } catch (closeAllError) {
+      logger.warn({ err: closeAllError }, 'notebooklm: error closing existing tabs, creating new page');
+      // Tạo tab mới nếu có lỗi
+      if (!page || page.isClosed()) {
+        page = await browser.newPage();
+      }
+    }
+    
+    // Đảm bảo có page hợp lệ
+    if (!page || page.isClosed()) {
+      page = await browser.newPage();
+    }
     const url = 'https://notebooklm.google.com/';
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     
@@ -354,7 +394,7 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                   logger.warn({}, 'notebooklm: Website chip not found');
                 }
               } catch (e) {
-                logger.warn({ err: e }, 'notebooklm: error adding website source');
+                // Ignore error adding website source
               }
             }
             

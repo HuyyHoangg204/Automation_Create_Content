@@ -29,29 +29,21 @@ function sanitizeName(name) {
  * @returns {Promise<string>} - Absolute path của userDataDir
  */
 async function resolveUserDataDir({ userDataDir, name, profileDirName }) {
-  // 1. Nếu userDataDir đã là absolute path (chứa path separator), return ngay
   if (userDataDir && (userDataDir.includes(path.sep) || userDataDir.includes('/') || userDataDir.includes('\\'))) {
-    // Kiểm tra xem có phải absolute path không
     if (path.isAbsolute(userDataDir)) {
       return userDataDir;
     }
   }
 
-  // 2. Ưu tiên sử dụng profileDirName nếu có
   const folderNameToUse = profileDirName || userDataDir || name;
-  
-  // 3. Tìm trong profiles index trước (theo userDataDir nếu là folder name, hoặc theo name)
   const searchKey = folderNameToUse;
   if (searchKey) {
     try {
       const profiles = await listChromeProfiles();
-      // Tìm profile theo userDataDir (nếu là folder name) hoặc theo name/dirName
-      const profile = profiles.find((p) => {
-        // So sánh với name hoặc dirName
+      const matchedProfiles = profiles.filter((p) => {
         if (p.name === searchKey || p.dirName === searchKey) {
           return true;
         }
-        // So sánh với basename của userDataDir (nếu userDataDir là folder name)
         if (userDataDir && p.userDataDir) {
           const basename = path.basename(p.userDataDir);
           return basename === userDataDir || basename === searchKey;
@@ -59,19 +51,44 @@ async function resolveUserDataDir({ userDataDir, name, profileDirName }) {
         return false;
       });
 
-      if (profile && profile.userDataDir) {
-        return profile.userDataDir;
+      if (matchedProfiles.length > 0) {
+        return matchedProfiles[0].userDataDir;
       }
     } catch (error) {
-      // Nếu lỗi khi load profiles index, tiếp tục build từ defaultProfilesDir
+      // Ignore
     }
   }
 
-  // 4. Fallback: Build từ profilesBaseDir + folder name
   const profilesBase = await getProfilesBaseDir();
   const folderName = profileDirName || userDataDir || sanitizeName(name || 'profile');
   return path.join(profilesBase, folderName);
 }
 
-module.exports = { resolveUserDataDir };
+async function getProfileDirNameFromIndex(userDataDir, name) {
+  try {
+    const profiles = await listChromeProfiles();
+    const profile = profiles.find((p) => {
+      if (userDataDir && p.userDataDir) {
+        if (path.isAbsolute(userDataDir)) {
+          return path.normalize(userDataDir) === path.normalize(p.userDataDir);
+        } else {
+          return path.basename(p.userDataDir) === userDataDir;
+        }
+      }
+      if (name && (p.name === name || p.dirName === name)) {
+        return true;
+      }
+      return false;
+    });
+    
+    if (profile) {
+      return profile.dirName || profile.name;
+    }
+  } catch (error) {
+    // Ignore
+  }
+  return null;
+}
+
+module.exports = { resolveUserDataDir, getProfileDirNameFromIndex };
 

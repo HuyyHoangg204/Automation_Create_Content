@@ -214,7 +214,6 @@ async function launchChromeProfile({ name, userDataDir, profileDirName = 'Defaul
   const child = spawn(chromePath, launchArgs, { detached: true, stdio: 'ignore', windowsHide: true });
   child.unref();
 
-  // Persist PID for reliable stop later
   try {
     await fs.writeFile(path.join(resolvedUserDataDir, '.chrome-profile.pid'), String(child.pid || ''));
     await fs.writeFile(path.join(resolvedUserDataDir, '.chrome-profile.debugport'), String(debugPort));

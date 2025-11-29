@@ -11,6 +11,8 @@ const { sendPrompt } = require('../scripts/sendPrompt');
 const { launchNotebookLM } = require('../scripts/notebooklm');
 const logService = require('../services/logService');
 const entityContextService = require('../services/entityContext');
+const profileMonitorService = require('../services/profileMonitor');
+const profileStatusEvent = require('../services/profileStatusEvent');
 
 const router = express.Router();
 
@@ -369,6 +371,8 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
       finalUserID = req.headers['x-user-id'] || req.body.user_id || 'unknown';
     }
     
+    const finalProfileDirName = profileDirName || 'Default';
+
     await logService.logInfo(finalEntityType, finalEntityID, finalUserID, 'outline_generation_started',
       'Bắt đầu tạo dàn ý bằng NotebookLM', {
         gem_name: gem,
@@ -376,6 +380,16 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
         has_youtube: !!(youtube && youtube.length > 0),
         has_text_content: !!textContent
       });
+
+    if (profileMonitorService.setAutomationStatus(userDataDir, finalProfileDirName, 'running')) {
+      profileStatusEvent.emitAutomationStatusChange(finalProfileDirName || userDataDir, 'running', {
+        userDataDir,
+        profileDirName: finalProfileDirName,
+        entityType: finalEntityType,
+        entityID: finalEntityID,
+        userID: finalUserID
+      });
+    }
     
     const outlinesDir = path.join(userDataDir, 'outlines');
     if (!fs.existsSync(outlinesDir)) {
@@ -407,6 +421,18 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
         'Người dùng chưa đăng nhập NotebookLM', {
           gem_name: gem
         });
+      
+      const finalProfileDirName = profileDirName || 'Default';
+      if (profileMonitorService.setAutomationStatus(userDataDir, finalProfileDirName, 'idle')) {
+        profileStatusEvent.emitAutomationStatusChange(finalProfileDirName || userDataDir, 'idle', {
+          userDataDir,
+          profileDirName: finalProfileDirName,
+          entityType: finalEntityType,
+          entityID: finalEntityID,
+          userID: finalUserID
+        });
+      }
+      
       return res.json({ 
         status: 'notebooklm_not_logged_in',
         error: 'User not logged in to NotebookLM'
@@ -419,6 +445,18 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
           gem_name: gem,
           error: notebooklmResult.error || 'Failed to generate outline'
         });
+      
+      const finalProfileDirName = profileDirName || 'Default';
+      if (profileMonitorService.setAutomationStatus(userDataDir, finalProfileDirName, 'idle')) {
+        profileStatusEvent.emitAutomationStatusChange(finalProfileDirName || userDataDir, 'idle', {
+          userDataDir,
+          profileDirName: finalProfileDirName,
+          entityType: finalEntityType,
+          entityID: finalEntityID,
+          userID: finalUserID
+        });
+      }
+      
       return res.json({ 
         status: 'notebooklm_failed',
         error: notebooklmResult.error || 'Failed to generate outline'
@@ -431,6 +469,18 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
           gem_name: gem,
           expected_file: outlineFilePath
         });
+      
+      const finalProfileDirName = profileDirName || 'Default';
+      if (profileMonitorService.setAutomationStatus(userDataDir, finalProfileDirName, 'idle')) {
+        profileStatusEvent.emitAutomationStatusChange(finalProfileDirName || userDataDir, 'idle', {
+          userDataDir,
+          profileDirName: finalProfileDirName,
+          entityType: finalEntityType,
+          entityID: finalEntityID,
+          userID: finalUserID
+        });
+      }
+      
       return res.json({ 
         status: 'outline_file_not_created',
         error: 'Outline file was not created by NotebookLM'
@@ -511,6 +561,16 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
           gem_name: gem,
           outline_file: outlineFileName
         });
+
+      if (profileMonitorService.setAutomationStatus(userDataDir, finalProfileDirName, 'idle')) {
+        profileStatusEvent.emitAutomationStatusChange(finalProfileDirName || userDataDir, 'idle', {
+          userDataDir,
+          profileDirName: finalProfileDirName,
+          entityType: finalEntityType,
+          entityID: finalEntityID,
+          userID: finalUserID
+        });
+      }
     } else {
       await logService.logWarning(finalEntityType, finalEntityID, finalUserID, 'outline_upload_failed',
         `Upload dàn ý lên Gemini không thành công: ${sendPromptResult.status}`, {
@@ -519,6 +579,16 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
           status: sendPromptResult.status,
           error: sendPromptResult.error || undefined
         });
+
+      if (profileMonitorService.setAutomationStatus(userDataDir, finalProfileDirName, 'idle')) {
+        profileStatusEvent.emitAutomationStatusChange(finalProfileDirName || userDataDir, 'idle', {
+          userDataDir,
+          profileDirName: finalProfileDirName,
+          entityType: finalEntityType,
+          entityID: finalEntityID,
+          userID: finalUserID
+        });
+      }
     }
     
     // Xóa file outline sau khi hoàn thành (thành công hoặc thất bại) để tránh tích lũy
@@ -563,6 +633,26 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
         error: err.message,
         gem_name: req.body?.gem || 'unknown'
       });
+
+    try {
+      const errorResolvedUserDataDir = await resolveUserDataDir({
+        userDataDir: errorUserDataDir,
+        name: errorName,
+        profileDirName: errorProfileDirName
+      });
+      const errorFinalProfileDirName = errorProfileDirName || 'Default';
+      if (profileMonitorService.setAutomationStatus(errorResolvedUserDataDir, errorFinalProfileDirName, 'idle')) {
+        profileStatusEvent.emitAutomationStatusChange(errorFinalProfileDirName || errorResolvedUserDataDir, 'idle', {
+          userDataDir: errorResolvedUserDataDir,
+          profileDirName: errorFinalProfileDirName,
+          entityType: errorEntityType,
+          entityID: errorEntityID,
+          userID: errorUserID
+        });
+      }
+    } catch (_) {
+      // Ignore
+    }
     
     logger.error({ err }, '[Gemini] Error in generate-outline-and-upload');
     return next(err);

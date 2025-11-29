@@ -3,7 +3,7 @@ const { z } = require('zod');
 const { logger } = require('../logger');
 const { validateBody } = require('../middleware/validators');
 const { createChromeProfile, getChromePathFromEnvOrDefault, launchChromeProfile, listChromeProfiles, getChromeProfileById, stopChromeProfile, ensureGmailLogin, getProfilesBaseDir, setProfilesBaseDir } = require('../services/chrome');
-const { resolveUserDataDir } = require('../utils/resolveUserDataDir');
+const { resolveUserDataDir, getProfileDirNameFromIndex } = require('../utils/resolveUserDataDir');
 const { ACCOUNT_GOOGLE } = require('../constants/constants');
 
 const logService = require('../services/logService');
@@ -147,20 +147,32 @@ router.post('/profiles/launch', validateBody(launchSchema), async (req, res, nex
   try {
     const { name, userDataDir: inputUserDataDir, profileDirName } = req.validatedBody;
     
-    // Auto-resolve userDataDir từ tên folder (hỗ trợ các máy khác nhau với user khác nhau)
-    const resolvedUserDataDir = await resolveUserDataDir({
-      userDataDir: inputUserDataDir,
-      name
-    });
-    
-    // Extract entity info từ request (có thể từ headers hoặc body)
     const entityType = req.headers['x-entity-type'] || req.body.entity_type || 'topic';
     const entityID = req.headers['x-entity-id'] || req.body.entity_id || 'unknown';
     const userID = req.headers['x-user-id'] || req.body.user_id || 'unknown';
     
-    // Lưu context vào entityContextService để dùng sau này khi create Gem
-    // Key: profileDirName (ưu tiên) hoặc resolvedUserDataDir
-    const contextKey = profileDirName || resolvedUserDataDir;
+    const resolvedUserDataDir = await resolveUserDataDir({
+      userDataDir: inputUserDataDir,
+      name,
+      profileDirName
+    });
+    
+    const profileDirNameFromIndex = await getProfileDirNameFromIndex(resolvedUserDataDir, name);
+    const finalProfileDirName = profileDirNameFromIndex || profileDirName || 'Default';
+    
+    const statusKey = finalProfileDirName;
+    const monitorStatus = profileMonitorService.getStatus(resolvedUserDataDir, statusKey);
+    const allMonitored = profileMonitorService.getAllMonitoredProfiles();
+    
+    const existingProfileForSameUser = allMonitored.find(p => 
+      p.userID === userID && p.userID !== 'unknown' && p.status === 'running'
+    );
+    
+    const existingProfileForSameKey = allMonitored.find(p => 
+      p.key === statusKey && p.status === 'running'
+    );
+    
+    const contextKey = finalProfileDirName;
     if (contextKey && entityID !== 'unknown' && userID !== 'unknown') {
       entityContextService.set(contextKey, {
         entityType,
@@ -169,36 +181,78 @@ router.post('/profiles/launch', validateBody(launchSchema), async (req, res, nex
       });
     }
     
-    // Log: Chrome launching
-    await logService.logInfo('topic', entityID, userID, 'chrome_launching', 
-      `Launching Chrome for profile: ${name || resolvedUserDataDir}`, {
-        name,
-        inputUserDataDir,
-        resolvedUserDataDir,
-        profileDirName
+    if (existingProfileForSameKey && existingProfileForSameKey.status === 'running') {
+      const fs = require('fs-extra');
+      const path = require('path');
+      const debugPortFile = path.join(resolvedUserDataDir, '.chrome-profile.debugport');
+      let debugPort = 9222;
+      try {
+        if (await fs.pathExists(debugPortFile)) {
+          const portStr = await fs.readFile(debugPortFile, 'utf-8');
+          debugPort = parseInt(portStr.trim(), 10) || 9222;
+        }
+      } catch (err) {
+        // Ignore debug port read error
+      }
+      
+      return res.status(200).json({
+        launched: false,
+        reused: true,
+        userDataDir: resolvedUserDataDir,
+        profileDirName: finalProfileDirName,
+        debugPort: existingProfileForSameKey.port || debugPort,
+        message: 'Chrome profile đang chạy, reuse instance hiện có'
       });
+    }
     
-    // Update validatedBody với resolved path
+    if (existingProfileForSameUser && existingProfileForSameUser.status === 'running') {
+      if (existingProfileForSameUser.automationStatus === 'running') {
+        return res.status(409).json({
+          error: 'Chrome profile đang chạy automation, không thể launch instance mới',
+          existingProfile: {
+            key: existingProfileForSameUser.key,
+            userDataDir: existingProfileForSameUser.userDataDir,
+            automationStatus: existingProfileForSameUser.automationStatus
+          }
+        });
+      }
+      
+      if (existingProfileForSameUser.key === statusKey) {
+        const fs = require('fs-extra');
+        const path = require('path');
+        const debugPortFile = path.join(resolvedUserDataDir, '.chrome-profile.debugport');
+        let debugPort = 9222;
+        try {
+          if (await fs.pathExists(debugPortFile)) {
+            const portStr = await fs.readFile(debugPortFile, 'utf-8');
+            debugPort = parseInt(portStr.trim(), 10) || 9222;
+          }
+        } catch (err) {
+          // Ignore debug port read error
+        }
+        
+        return res.status(200).json({
+          launched: false,
+          reused: true,
+          userDataDir: resolvedUserDataDir,
+          profileDirName: finalProfileDirName,
+          debugPort: existingProfileForSameUser.port || debugPort,
+          message: 'Chrome profile đang chạy, reuse instance hiện có'
+        });
+      }
+    }
+    
     const launchParams = {
       ...req.validatedBody,
-      userDataDir: resolvedUserDataDir
+      userDataDir: resolvedUserDataDir,
+      profileDirName: finalProfileDirName
     };
     
     const result = await launchChromeProfile(launchParams);
     
-    // Extract debug port from launch args
     const debugPortArg = result.launchArgs?.find(a => a.includes('--remote-debugging-port'));
     const debugPort = debugPortArg ? parseInt(debugPortArg.split('=')[1], 10) : undefined;
     
-    // Log: Chrome launched
-    await logService.logSuccess('topic', entityID, userID, 'chrome_launched',
-      'Chrome launched successfully', {
-        pid: result.pid,
-        debugPort: debugPort || undefined,
-        gmailStatus: result.gmailCheckStatus
-      });
-    
-    const finalProfileDirName = profileDirName || 'Default';
     
     profileMonitorService.startMonitoring({
       userDataDir: resolvedUserDataDir,
@@ -213,7 +267,6 @@ router.post('/profiles/launch', validateBody(launchSchema), async (req, res, nex
     
     return res.status(201).json({ launched: true, ...result });
   } catch (err) {
-    // Log error
     const entityID = req.headers['x-entity-id'] || req.body.entity_id || 'unknown';
     const userID = req.headers['x-user-id'] || req.body.user_id || 'unknown';
     await logService.logError('topic', entityID, userID, 'chrome_launching',
@@ -337,6 +390,10 @@ router.get('/profiles/status/stream', async (req, res) => {
     sendEvent('status-change', statusData);
   };
 
+  const onAutomationStatusChange = (automationStatusData) => {
+    sendEvent('automation-status-change', automationStatusData);
+  };
+
   const onGetAllStatus = async () => {
     try {
       const profiles = await listChromeProfiles();
@@ -355,6 +412,7 @@ router.get('/profiles/status/stream', async (req, res) => {
             running: monitorStatus.status === 'running',
             monitored: true,
             status: monitorStatus.status,
+            automationStatus: monitorStatus.automationStatus || 'idle',
             startTime: monitorStatus.startTime,
             uptime: monitorStatus.uptime,
             userDataDir: profile.userDataDir
@@ -376,6 +434,7 @@ router.get('/profiles/status/stream', async (req, res) => {
 
   profileStatusEvent.on('status-change', onStatusChange);
   profileStatusEvent.on('get-all-status', onGetAllStatus);
+  profileStatusEvent.on('automation-status-change', onAutomationStatusChange);
   
   onGetAllStatus();
 
@@ -395,6 +454,7 @@ router.get('/profiles/status/stream', async (req, res) => {
     clearInterval(heartbeatInterval);
     profileStatusEvent.removeListener('status-change', onStatusChange);
     profileStatusEvent.removeListener('get-all-status', onGetAllStatus);
+    profileStatusEvent.removeListener('automation-status-change', onAutomationStatusChange);
     if (!res.writableEnded) {
       res.end();
     }
