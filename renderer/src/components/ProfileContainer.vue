@@ -69,32 +69,125 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { useToast } from 'primevue/usetoast'
 import DataTable from 'primevue/datatable'
 import Column from 'primevue/column'
 import { ProfileAPI } from '@/api/profile.js'
+import { API_BASE_URL } from '@/constants/constants.js'
 
 const toast = useToast()
 
-// Load profiles from backend API
+let eventSource = null
+const statusMap = ref({})
+
+function getProfileKey(profile) {
+  return profile.profileDirName || profile.userDataDir
+}
+
+function connectStatusStream() {
+  if (eventSource) {
+    eventSource.close()
+  }
+
+  eventSource = new EventSource(`${API_BASE_URL}/chrome/profiles/status/stream`)
+
+  eventSource.addEventListener('connected', (event) => {
+  })
+
+  eventSource.addEventListener('all-status', (event) => {
+    const data = JSON.parse(event.data)
+    statusMap.value = data
+    
+    for (const profile of profiles.value) {
+      let matchedKey = null
+      const profileKey = getProfileKey(profile)
+      
+      if (profileKey in statusMap.value) {
+        matchedKey = profileKey
+      } else {
+        for (const key in statusMap.value) {
+          const statusData = statusMap.value[key]
+          if (statusData.userDataDir === profile.userDataDir) {
+            matchedKey = key
+            profile.profileDirName = key
+            break
+          }
+        }
+      }
+      
+      if (matchedKey) {
+        profile.actionStatus = statusMap.value[matchedKey].running ? 'running' : 'stopped'
+      }
+    }
+  })
+
+  eventSource.addEventListener('status-change', (event) => {
+    const data = JSON.parse(event.data)
+    const key = data.profileKey
+    
+    statusMap.value[key] = {
+      running: data.status === 'running',
+      monitored: true,
+      status: data.status,
+      startTime: data.startTime,
+      uptime: data.startTime ? Date.now() - data.startTime : 0,
+      userDataDir: data.userDataDir
+    }
+    
+    for (const profile of profiles.value) {
+      const profileKey = getProfileKey(profile)
+      
+      if (profileKey === key) {
+        profile.actionStatus = data.status === 'running' ? 'running' : 'stopped'
+        break
+      } else if (data.userDataDir && profile.userDataDir === data.userDataDir) {
+        profile.profileDirName = key
+        profile.actionStatus = data.status === 'running' ? 'running' : 'stopped'
+        break
+      }
+    }
+  })
+
+  eventSource.onerror = (error) => {
+    eventSource.close()
+    
+    setTimeout(() => {
+      connectStatusStream()
+    }, 3000)
+  }
+}
+
+function disconnectStatusStream() {
+  if (eventSource) {
+    eventSource.close()
+    eventSource = null
+  }
+}
+
 async function loadProfiles() {
   try {
     const result = await ProfileAPI.getAll()
     
     if (result && result.profiles) {
-      // Map API response to frontend format
-      profiles.value = result.profiles.map(p => ({
-        id: p.id,
-        name: p.name,
-        userDataDir: p.userDataDir,
-        profileDirName: p.profileDirName,
-        createdAt: p.createdAt,
-        updatedAt: p.updatedAt,
-        actionStatus: 'stopped' // Default: stopped (shows Launch button)
-      }))
+      profiles.value = result.profiles.map((p) => {
+        const key = getProfileKey(p)
+        const status = statusMap.value[key]
+        
+        return {
+          id: p.id,
+          name: p.name,
+          userDataDir: p.userDataDir,
+          profileDirName: p.profileDirName,
+          createdAt: p.createdAt,
+          updatedAt: p.updatedAt,
+          actionStatus: status?.running ? 'running' : 'stopped'
+        }
+      })
       
-      console.log('✅ Profiles loaded:', profiles.value.length)
+      if (!eventSource || eventSource.readyState === EventSource.CLOSED) {
+        connectStatusStream()
+      }
     } else {
       console.warn('⚠️ No profiles found in response')
       profiles.value = []
@@ -116,7 +209,6 @@ async function handleProfileAction(profile) {
   try {
     if (profile.actionStatus === 'running') {
       // Stop profile
-      console.log('⏹️  Stopping profile:', profile.name)
       
       toast.add({
         severity: 'info',
@@ -144,8 +236,6 @@ async function handleProfileAction(profile) {
         })
       }
     } else {
-      // Launch profile
-      console.log('🚀 Launching profile:', profile.name)
       
       toast.add({
         severity: 'info',
@@ -207,6 +297,10 @@ function formatDate(dateString) {
 // Load profiles on mount
 onMounted(() => {
   loadProfiles()
+})
+
+onUnmounted(() => {
+  disconnectStatusStream()
 })
 
 // Expose loadProfiles for parent component

@@ -51,10 +51,9 @@ async function startAPIServer() {
     
     const expressApp = await createApp()
     apiServer = expressApp.listen(port, '127.0.0.1', () => {
-      // API Server started
     })
   } catch (error) {
-    // Failed to start API server
+    console.error('[API Server] ❌ Failed to start:', error)
   }
 }
 
@@ -656,17 +655,31 @@ app.on('activate', () => {
 app.whenReady().then(async () => {
   // 1. Start API Server first
   await startAPIServer()
+  
+  // Đợi một chút để đảm bảo server đã sẵn sàng
+  await new Promise(resolve => setTimeout(resolve, 500))
+  
   await initializeLogService();
   
-  // 2. Start Tunnel Client
-  startTunnel()
-  
-  // 3. Create Window
-  createWindow()
-  
-  // 4. Start heartbeat interval (gửi mỗi 30 giây)
+  // 2. Recover monitoring state (sau khi API server start)
   const backendRequire = createRequire(import.meta.url)
   const projectRoot = path.join(__dirname, '..')
+  try {
+    const profileMonitorService = backendRequire(path.join(projectRoot, 'src', 'services', 'profileMonitor.js'))
+    setTimeout(async () => {
+      await profileMonitorService.recoverMonitoring()
+    }, 2000)
+  } catch (error) {
+    console.error('[ProfileMonitor] Error recovering:', error)
+  }
+  
+  // 3. Start Tunnel Client
+  startTunnel()
+  
+  // 4. Create Window (sau khi server đã start)
+  createWindow()
+  
+  // 5. Start heartbeat interval (gửi mỗi 30 giây)
   const config = backendRequire(path.join(projectRoot, 'src', 'config.js'))
   const apiPort = config.port || 3000
   
@@ -706,7 +719,7 @@ app.whenReady().then(async () => {
 })
 
 // Cleanup on quit
-app.on('will-quit', () => {
+app.on('will-quit', async (event) => {
   globalShortcut.unregisterAll()
   
   // Clear heartbeat interval
@@ -715,23 +728,49 @@ app.on('will-quit', () => {
     heartbeatInterval = null
   }
   
-  // Close API server
-  if (apiServer) {
-    apiServer.close()
+  // Stop all profile monitoring
+  try {
+    const backendRequire = createRequire(import.meta.url)
+    const projectRoot = path.join(__dirname, '..')
+    const profileMonitorService = backendRequire(path.join(projectRoot, 'src', 'services', 'profileMonitor.js'))
+    await profileMonitorService.stopAll()
+  } catch (error) {
+    // Ignore error
   }
   
-  // Kill tunnel process
-  if (tunnelProcess) {
-    try {
-      tunnelProcess.kill('SIGTERM')
-      // Wait a bit for graceful shutdown
-      setTimeout(() => {
-        if (tunnelProcess && !tunnelProcess.killed) {
-          tunnelProcess.kill('SIGKILL')
+  // Close API server gracefully
+  if (apiServer) {
+    return new Promise((resolve) => {
+      apiServer.close(() => {
+        // Kill tunnel process
+        if (tunnelProcess) {
+          try {
+            tunnelProcess.kill('SIGTERM')
+            setTimeout(() => {
+              if (tunnelProcess && !tunnelProcess.killed) {
+                tunnelProcess.kill('SIGKILL')
+              }
+              resolve()
+            }, 1000)
+          } catch (error) {
+            resolve()
+          }
+        } else {
+          resolve()
         }
-      }, 2000)
-    } catch (error) {
-      // Error stopping tunnel
+      })
+      
+      setTimeout(() => {
+        resolve()
+      }, 3000)
+    })
+  } else {
+    if (tunnelProcess) {
+      try {
+        tunnelProcess.kill('SIGTERM')
+      } catch (error) {
+        // Ignore
+      }
     }
   }
 })

@@ -170,5 +170,31 @@ export class ProfileAPI {
       throw error
     }
   }
+
+  /**
+   * Check profile status (running or stopped)
+   * GET /chrome/profiles/status?name=xxx&userDataDir=xxx&profileDirName=xxx
+   */
+  static async getStatus({ name, userDataDir, profileDirName }) {
+    try {
+      const params = new URLSearchParams()
+      if (name) params.append('name', name)
+      if (userDataDir) params.append('userDataDir', userDataDir)
+      if (profileDirName) params.append('profileDirName', profileDirName)
+      
+      const response = await fetch(`${API_BASE_URL}/chrome/profiles/status?${params.toString()}`)
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.message || `HTTP error! status: ${response.status}`)
+      }
+      
+      const data = await response.json()
+      return data
+    } catch (error) {
+      console.error('Error getting profile status:', error)
+      throw error
+    }
+  }
 }
 
