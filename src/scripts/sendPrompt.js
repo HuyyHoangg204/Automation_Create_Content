@@ -34,7 +34,10 @@ function hasContinueText(text) {
     'còn tiếp, gõ continue để tiếp tục',
     'còn tiếp',
     'gõ continue để tiếp tục',
-    'continue để tiếp tục'
+    'continue để tiếp tục',
+    'continued, type continue to proceed',
+    'type continue to proceed',
+    'continued',
   ];
   
   return continuePatterns.some(pattern => 

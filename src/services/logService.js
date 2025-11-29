@@ -37,8 +37,6 @@ class LogService {
       await this.channel.assertQueue(this.queueName, {
         durable: true
       });
-      
-      console.log('LogService: RabbitMQ connected');
     } catch (error) {
       console.error('LogService: Failed to connect to RabbitMQ, using HTTP fallback:', error.message);
       this.useRabbitMQ = false;

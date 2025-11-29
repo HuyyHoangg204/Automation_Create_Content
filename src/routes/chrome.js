@@ -8,6 +8,8 @@ const { ACCOUNT_GOOGLE } = require('../constants/constants');
 
 const logService = require('../services/logService');
 const entityContextService = require('../services/entityContext');
+const profileMonitorService = require('../services/profileMonitor');
+const profileStatusEvent = require('../services/profileStatusEvent');
 
 const router = express.Router();
 
@@ -29,6 +31,88 @@ router.get('/profiles', async (req, res, next) => {
   try {
     const profiles = await listChromeProfiles();
     return res.json({ profiles });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.get('/profiles/status', async (req, res, next) => {
+  try {
+    const { name, userDataDir: inputUserDataDir, profileDirName } = req.query;
+    
+    if ((!name || name.trim() === '') && (!inputUserDataDir || inputUserDataDir.trim() === '')) {
+      return res.status(400).json({ error: 'Either name or userDataDir must be provided' });
+    }
+
+    let resolvedUserDataDir;
+    try {
+      resolvedUserDataDir = await resolveUserDataDir({
+        userDataDir: inputUserDataDir,
+        name,
+        profileDirName: profileDirName || 'Default'
+      });
+    } catch (resolveError) {
+      console.error('[Status API] Resolve error:', resolveError);
+      return res.status(400).json({ 
+        error: 'Failed to resolve userDataDir', 
+        message: resolveError?.message || 'Invalid profile name or path'
+      });
+    }
+
+    const statusKey = profileDirName || 'Default';
+    
+    const monitorStatus = profileMonitorService.getStatus(resolvedUserDataDir, statusKey);
+    
+    if (monitorStatus.monitored) {
+      return res.json({ 
+        running: monitorStatus.status === 'running',
+        monitored: true,
+        status: monitorStatus.status,
+        startTime: monitorStatus.startTime,
+        uptime: monitorStatus.uptime
+      });
+    }
+
+    const fs = require('fs');
+    const path = require('path');
+    
+    const pidFile = path.join(resolvedUserDataDir, '.chrome-profile.pid');
+    let isRunning = false;
+    
+    if (fs.existsSync(pidFile)) {
+      try {
+        const pid = parseInt(fs.readFileSync(pidFile, 'utf8'), 10);
+        if (Number.isInteger(pid) && pid > 0) {
+          if (process.platform === 'win32') {
+            const { execSync } = require('child_process');
+            try {
+              const output = execSync(`tasklist /FI "PID eq ${pid}" /NH`, { 
+                encoding: 'utf8',
+                stdio: ['ignore', 'pipe', 'ignore'],
+                windowsHide: true
+              });
+              isRunning = output.trim().length > 0 && output.includes(String(pid));
+            } catch {
+              isRunning = false;
+            }
+          } else {
+            try {
+              process.kill(pid, 0);
+              isRunning = true;
+            } catch {
+              isRunning = false;
+            }
+          }
+        }
+      } catch {
+        isRunning = false;
+      }
+    }
+
+    return res.json({ 
+      running: isRunning,
+      monitored: false
+    });
   } catch (err) {
     return next(err);
   }
@@ -102,13 +186,30 @@ router.post('/profiles/launch', validateBody(launchSchema), async (req, res, nex
     
     const result = await launchChromeProfile(launchParams);
     
+    // Extract debug port from launch args
+    const debugPortArg = result.launchArgs?.find(a => a.includes('--remote-debugging-port'));
+    const debugPort = debugPortArg ? parseInt(debugPortArg.split('=')[1], 10) : undefined;
+    
     // Log: Chrome launched
     await logService.logSuccess('topic', entityID, userID, 'chrome_launched',
       'Chrome launched successfully', {
         pid: result.pid,
-        debugPort: result.launchArgs?.find(a => a.includes('--remote-debugging-port'))?.split('=')[1],
+        debugPort: debugPort || undefined,
         gmailStatus: result.gmailCheckStatus
       });
+    
+    const finalProfileDirName = profileDirName || 'Default';
+    
+    profileMonitorService.startMonitoring({
+      userDataDir: resolvedUserDataDir,
+      profileDirName: finalProfileDirName,
+      preferPort: debugPort,
+      entityType,
+      entityID,
+      userID
+    }).catch((err) => {
+      console.error(`[ProfileMonitor] Lỗi khi start monitoring:`, err.message);
+    });
     
     return res.status(201).json({ launched: true, ...result });
   } catch (err) {
@@ -124,6 +225,17 @@ router.post('/profiles/launch', validateBody(launchSchema), async (req, res, nex
 
 router.post('/profiles/stop', validateBody(launchSchema), async (req, res, next) => {
   try {
+    const { name, userDataDir: inputUserDataDir, profileDirName } = req.validatedBody;
+    
+    // Auto-resolve userDataDir từ tên folder
+    const resolvedUserDataDir = await resolveUserDataDir({
+      userDataDir: inputUserDataDir,
+      name
+    });
+    
+    // Stop monitoring profile
+    await profileMonitorService.stopMonitoring(resolvedUserDataDir, profileDirName);
+    
     const result = await stopChromeProfile(req.validatedBody);
     return res.status(200).json(result);
   } catch (err) {
@@ -206,6 +318,89 @@ router.post('/profiles/login-gmail', validateBody(loginSchema), async (req, res,
   } catch (err) {
     return next(err);
   }
+});
+
+router.get('/profiles/status/stream', async (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  
+  const sendEvent = (event, data) => {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  sendEvent('connected', { message: 'Connected to profile status stream' });
+
+  const onStatusChange = (statusData) => {
+    sendEvent('status-change', statusData);
+  };
+
+  const onGetAllStatus = async () => {
+    try {
+      const profiles = await listChromeProfiles();
+      const allMonitored = profileMonitorService.getAllMonitoredProfiles();
+      const statusMap = {};
+      
+      for (const profile of profiles) {
+        const monitoredProfile = allMonitored.find(m => m.userDataDir === profile.userDataDir);
+        const actualProfileDirName = monitoredProfile?.profileDirName || profile.profileDirName || 'Default';
+        const key = actualProfileDirName;
+        
+        const monitorStatus = profileMonitorService.getStatus(profile.userDataDir, actualProfileDirName);
+        
+        if (monitorStatus.monitored) {
+          statusMap[key] = {
+            running: monitorStatus.status === 'running',
+            monitored: true,
+            status: monitorStatus.status,
+            startTime: monitorStatus.startTime,
+            uptime: monitorStatus.uptime,
+            userDataDir: profile.userDataDir
+          };
+        } else {
+          statusMap[key] = {
+            running: false,
+            monitored: false,
+            userDataDir: profile.userDataDir
+          };
+        }
+      }
+      
+      sendEvent('all-status', statusMap);
+    } catch (error) {
+      console.error('[SSE] Error getting all status:', error);
+    }
+  };
+
+  profileStatusEvent.on('status-change', onStatusChange);
+  profileStatusEvent.on('get-all-status', onGetAllStatus);
+  
+  onGetAllStatus();
+
+  const heartbeatInterval = setInterval(() => {
+    if (!res.writableEnded && res.writable) {
+      try {
+        res.write(': heartbeat\n\n');
+      } catch (error) {
+        clearInterval(heartbeatInterval);
+      }
+    } else {
+      clearInterval(heartbeatInterval);
+    }
+  }, 30000);
+
+  req.on('close', () => {
+    clearInterval(heartbeatInterval);
+    profileStatusEvent.removeListener('status-change', onStatusChange);
+    profileStatusEvent.removeListener('get-all-status', onGetAllStatus);
+    if (!res.writableEnded) {
+      res.end();
+    }
+  });
+
+  await onGetAllStatus();
 });
 
 module.exports = router;
