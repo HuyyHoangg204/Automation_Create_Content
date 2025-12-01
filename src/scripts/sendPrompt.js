@@ -120,33 +120,28 @@ async function extractTextFromGemini(page, browser, userDataDir) {
       return { success: false, text: null, error: 'failed to click copy-button' };
     }
     
-    const tempDir = path.join(userDataDir, 'temp_downloads');
-    if (!fs.existsSync(tempDir)) {
-      fs.mkdirSync(tempDir, { recursive: true });
-    }
+    const anotepadPage = await browser.newPage();
     
-    const editpadPage = await browser.newPage();
-    
-    const client = editpadPage._client();
-    await client.send('Page.setDownloadBehavior', {
-      behavior: 'allow',
-      downloadPath: tempDir
-    });
-    
-    await editpadPage.goto('https://www.editpad.org/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await anotepadPage.goto('https://anotepad.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
     
     await new Promise((r) => setTimeout(r, 2000));
     
-    const editorFound = await editpadPage.evaluate(() => {
-      let editor = document.querySelector('textarea');
+    const editorFound = await anotepadPage.evaluate(() => {
+      let editor = document.querySelector('#edit_textarea');
+      if (!editor) {
+        editor = document.querySelector('textarea[name="notecontent"]');
+      }
+      if (!editor) {
+        editor = document.querySelector('textarea.form-control.textarea');
+      }
+      if (!editor) {
+        editor = document.querySelector('textarea');
+      }
       if (!editor) {
         editor = document.querySelector('[contenteditable="true"]');
       }
       if (!editor) {
         editor = document.querySelector('[role="textbox"]');
-      }
-      if (!editor) {
-        editor = document.querySelector('#editor, .editor, [class*="editor"], [id*="editor"]');
       }
       
       if (editor) {
@@ -164,118 +159,49 @@ async function extractTextFromGemini(page, browser, userDataDir) {
     });
     
     if (!editorFound) {
-      await editpadPage.close();
-      return { success: false, text: null, error: 'editor not found on editpad.org' };
+      await anotepadPage.close();
+      return { success: false, text: null, error: 'editor not found on anotepad.com' };
     }
     
     await new Promise((r) => setTimeout(r, 500));
     
-    await editpadPage.keyboard.down('Control');
-    await editpadPage.keyboard.press('a');
-    await editpadPage.keyboard.up('Control');
+    await anotepadPage.keyboard.down('Control');
+    await anotepadPage.keyboard.press('a');
+    await anotepadPage.keyboard.up('Control');
     await new Promise((r) => setTimeout(r, 200));
     
-    await editpadPage.keyboard.down('Control');
-    await editpadPage.keyboard.press('v');
-    await editpadPage.keyboard.up('Control');
+    await anotepadPage.keyboard.down('Control');
+    await anotepadPage.keyboard.press('v');
+    await anotepadPage.keyboard.up('Control');
     
     await new Promise((r) => setTimeout(r, 2000));
     
-    await editpadPage.keyboard.down('Control');
-    await editpadPage.keyboard.press('a');
-    await editpadPage.keyboard.up('Control');
-    await new Promise((r) => setTimeout(r, 200));
-    
-    const downloadClicked = await editpadPage.evaluate(() => {
-      const downloadBtn = document.querySelector('button#downloadFile, button[data-text="Download"], button[id*="download"]');
-      if (downloadBtn) {
-        downloadBtn.click();
-        return true;
+    const text = await anotepadPage.evaluate(() => {
+      let editor = document.querySelector('#edit_textarea');
+      if (!editor) {
+        editor = document.querySelector('textarea[name="notecontent"]');
       }
-      return false;
+      if (!editor) {
+        editor = document.querySelector('textarea.form-control.textarea');
+      }
+      if (!editor) {
+        editor = document.querySelector('textarea');
+      }
+      
+      if (editor) {
+        if (editor.tagName === 'TEXTAREA' || editor.tagName === 'INPUT') {
+          return editor.value || '';
+        } else {
+          return editor.textContent || editor.innerText || '';
+        }
+      }
+      return '';
     });
     
-    if (!downloadClicked) {
-      await editpadPage.close();
-      return { success: false, text: null, error: 'download button not found' };
-    }
+    await anotepadPage.close();
     
-    await new Promise((r) => setTimeout(r, 1000));
-    
-    let downloadedFile = null;
-    const maxAttempts = 40;
-    const pollInterval = 500;
-    
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      await new Promise((r) => setTimeout(r, pollInterval));
-      
-      if (!fs.existsSync(tempDir)) {
-        continue;
-      }
-      
-      const files = fs.readdirSync(tempDir);
-      
-      const allFiles = files.filter(f => {
-        // Bỏ qua file đang download (.crdownload)
-        if (f.endsWith('.crdownload')) {
-          return false;
-        }
-        
-        const filePath = path.join(tempDir, f);
-        try {
-          const stats = fs.statSync(filePath);
-          return stats.isFile();
-        } catch {
-          return false;
-        }
-      });
-      
-      if (allFiles.length > 0) {
-        const fileStats = allFiles.map(f => {
-          const filePath = path.join(tempDir, f);
-          try {
-            const stats = fs.statSync(filePath);
-            return {
-              name: f,
-              path: filePath,
-              mtime: stats.mtime,
-              size: stats.size
-            };
-          } catch {
-            return null;
-          }
-        }).filter(f => f !== null);
-        
-        if (fileStats.length > 0) {
-          fileStats.sort((a, b) => b.mtime - a.mtime);
-          const newestFile = fileStats[0];
-          
-          if (newestFile.size > 0) {
-            downloadedFile = newestFile.path;
-            break;
-          }
-        }
-      }
-    }
-    
-    await editpadPage.close();
-    
-    if (!downloadedFile || !fs.existsSync(downloadedFile)) {
-      return { success: false, text: null, error: 'downloaded file not found' };
-    }
-    
-    await new Promise((r) => setTimeout(r, 500));
-    
-    if (!fs.existsSync(downloadedFile) || downloadedFile.endsWith('.crdownload')) {
-      return { success: false, text: null, error: 'downloaded file not ready' };
-    }
-    
-    const text = fs.readFileSync(downloadedFile, 'utf8');
-    
-    try {
-      fs.unlinkSync(downloadedFile);
-    } catch (unlinkErr) {
-      // Ignore
+    if (!text || text.trim().length === 0) {
+      return { success: false, text: null, error: 'no text extracted from anotepad.com' };
     }
     
     return { success: true, text, error: null };

@@ -877,31 +877,34 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                       // Wait a bit for clipboard to be updated
                       await new Promise((r) => setTimeout(r, 500));
                       
-                      // Open editpad.org in a new tab and paste text, then save to file
+                      // Open anotepad.com in a new tab and paste text, then save to file
                       try {
                         
-                        // Open new tab with editpad.org
-                        const editpadPage = await browser.newPage();
-                        await editpadPage.goto('https://www.editpad.org/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+                        // Open new tab with anotepad.com
+                        const anotepadPage = await browser.newPage();
+                        await anotepadPage.goto('https://anotepad.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
                         
                         // Wait for editor to be ready
                         await new Promise((r) => setTimeout(r, 2000));
                         
                         // Find the textarea/editor element using evaluate
-                        const editorFound = await editpadPage.evaluate(() => {
-                          // Try to find textarea first
-                          let editor = document.querySelector('textarea');
+                        const editorFound = await anotepadPage.evaluate(() => {
+                          // Priority 1: Try anotepad.com specific selectors
+                          let editor = document.querySelector('#edit_textarea');
                           if (!editor) {
-                            // Try contenteditable
+                            editor = document.querySelector('textarea[name="notecontent"]');
+                          }
+                          if (!editor) {
+                            editor = document.querySelector('textarea.form-control.textarea');
+                          }
+                          if (!editor) {
+                            editor = document.querySelector('textarea');
+                          }
+                          if (!editor) {
                             editor = document.querySelector('[contenteditable="true"]');
                           }
                           if (!editor) {
-                            // Try role="textbox"
                             editor = document.querySelector('[role="textbox"]');
-                          }
-                          if (!editor) {
-                            // Try by class or ID
-                            editor = document.querySelector('#editor, .editor, [class*="editor"], [id*="editor"]');
                           }
                           
                           if (editor) {
@@ -926,15 +929,15 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                           await new Promise((r) => setTimeout(r, 500));
                           
                           // Select all existing text (Ctrl+A) to replace it
-                          await editpadPage.keyboard.down('Control');
-                          await editpadPage.keyboard.press('a');
-                          await editpadPage.keyboard.up('Control');
+                          await anotepadPage.keyboard.down('Control');
+                          await anotepadPage.keyboard.press('a');
+                          await anotepadPage.keyboard.up('Control');
                           await new Promise((r) => setTimeout(r, 200));
                           
                           // Paste using keyboard shortcut (will replace selected text)
-                          await editpadPage.keyboard.down('Control');
-                          await editpadPage.keyboard.press('v');
-                          await editpadPage.keyboard.up('Control');
+                          await anotepadPage.keyboard.down('Control');
+                          await anotepadPage.keyboard.press('v');
+                          await anotepadPage.keyboard.up('Control');
                           
                           // Wait for paste to complete (longer wait to ensure paste is done)
                           await new Promise((r) => setTimeout(r, 2000));
@@ -947,38 +950,33 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                             for (let attempt = 0; attempt < 3; attempt++) {
                               await new Promise((r) => setTimeout(r, 500));
                               
-                              pastedText = await editpadPage.evaluate(() => {
-                                // Try to get text from textarea value first
-                                const textarea = document.querySelector('textarea');
-                                if (textarea) {
-                                  const value = textarea.value || textarea.textContent || textarea.innerText || '';
-                                  if (value && value.trim().length > 0) {
-                                    return value;
+                              pastedText = await anotepadPage.evaluate(() => {
+                                // Priority 1: Try anotepad.com specific selectors
+                                let editor = document.querySelector('#edit_textarea');
+                                if (!editor) {
+                                  editor = document.querySelector('textarea[name="notecontent"]');
+                                }
+                                if (!editor) {
+                                  editor = document.querySelector('textarea.form-control.textarea');
+                                }
+                                if (!editor) {
+                                  editor = document.querySelector('textarea');
+                                }
+                                
+                                if (editor) {
+                                  if (editor.tagName === 'TEXTAREA' || editor.tagName === 'INPUT') {
+                                    return editor.value || '';
+                                  } else {
+                                    return editor.textContent || editor.innerText || '';
                                   }
                                 }
                                 
-                                // Try contenteditable div
+                                // Fallback: Try contenteditable div
                                 const contentEditable = document.querySelector('[contenteditable="true"]');
                                 if (contentEditable) {
                                   const text = contentEditable.textContent || contentEditable.innerText || contentEditable.value || '';
                                   if (text && text.trim().length > 0) {
                                     return text;
-                                  }
-                                }
-                                
-                                // Try any element with editor-related classes
-                                const editorElements = document.querySelectorAll('[class*="editor"], [id*="editor"], [class*="text"], [id*="text"]');
-                                for (const el of editorElements) {
-                                  if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
-                                    const value = el.value || '';
-                                    if (value && value.trim().length > 0) {
-                                      return value;
-                                    }
-                                  } else if (el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true') {
-                                    const text = el.textContent || el.innerText || '';
-                                    if (text && text.trim().length > 0) {
-                                      return text;
-                                    }
                                   }
                                 }
                                 
@@ -991,45 +989,7 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                             }
                             
                           } catch (extractErr) {
-                            logger.warn({ err: extractErr }, 'notebooklm: error extracting text from editpad');
-                          }
-                          
-                          // If still no text, try clicking download button as fallback
-                          if (!pastedText || pastedText.length === 0) {
-                            
-                            try {
-                              // Click download button
-                              const downloadClicked = await editpadPage.evaluate(() => {
-                                const downloadBtn = document.querySelector('button#downloadFile, button[data-text="Download"], button[id*="download"]');
-                                if (downloadBtn) {
-                                  downloadBtn.click();
-                                  return true;
-                                }
-                                return false;
-                              });
-                              
-                              if (downloadClicked) {
-                                // Note: File will be downloaded to browser's default download folder
-                                // We can't easily intercept and move it to outputFile path
-                                // So we'll still try to extract text one more time after a delay
-                                await new Promise((r) => setTimeout(r, 1000));
-                                
-                                // Try extracting text one more time
-                                pastedText = await editpadPage.evaluate(() => {
-                                  const textarea = document.querySelector('textarea');
-                                  if (textarea) {
-                                    return textarea.value || textarea.textContent || '';
-                                  }
-                                  const contentEditable = document.querySelector('[contenteditable="true"]');
-                                  if (contentEditable) {
-                                    return contentEditable.textContent || contentEditable.innerText || '';
-                                  }
-                                  return '';
-                                });
-                              }
-                            } catch (downloadErr) {
-                              logger.warn({ err: downloadErr }, 'notebooklm: error clicking download button');
-                            }
+                            logger.warn({ err: extractErr }, 'notebooklm: error extracting text from anotepad');
                           }
                           
                           // Save to file (outputFile path is already set to profile folder by caller)
@@ -1043,17 +1003,17 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                             
                             fs.writeFileSync(outputPath, pastedText, 'utf8');
                           } else {
-                            logger.warn({}, 'notebooklm: no text extracted from editpad, file not saved');
+                            logger.warn({}, 'notebooklm: no text extracted from anotepad, file not saved');
                           }
                           
-                          // Close editpad tab
-                          await editpadPage.close();
+                          // Close anotepad tab
+                          await anotepadPage.close();
                         } else {
-                          logger.warn({}, 'notebooklm: editor not found on editpad.org');
-                          await editpadPage.close();
+                          logger.warn({}, 'notebooklm: editor not found on anotepad.com');
+                          await anotepadPage.close();
                         }
-                      } catch (editpadErr) {
-                        logger.error({ err: editpadErr, stack: editpadErr.stack }, 'notebooklm: error using editpad.org');
+                      } catch (anotepadErr) {
+                        logger.error({ err: anotepadErr, stack: anotepadErr.stack }, 'notebooklm: error using anotepad.com');
                       }
                     } else {
                       logger.warn({}, 'notebooklm: copy button not found');
