@@ -30,6 +30,7 @@ module.exports = {
   rootDir,
   uploadDir: process.env.UPLOAD_DIR || path.join(rootDir, 'uploads'),
   defaultProfilesDir: getDefaultProfilesDir(),
+  profileIdleTimeout: parseInt(process.env.PROFILE_IDLE_TIMEOUT || '600000', 10),
 };
 
 

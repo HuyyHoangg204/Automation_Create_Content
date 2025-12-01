@@ -1,13 +1,18 @@
 const path = require('path');
 const fs = require('fs-extra');
 const { connectToBrowserByUserDataDir } = require('../scripts/gmailLogin');
-const { readDebugPort, getProfilesBaseDir } = require('../services/chrome');
+const { readDebugPort, getProfilesBaseDir, stopChromeProfile } = require('../services/chrome');
 const { waitForChromeReady } = require('../services/workflowService');
 const profileStatusEvent = require('./profileStatusEvent');
+const config = require('../config');
 
 class ProfileMonitorService {
   constructor() {
     this.monitoredProfiles = new Map();
+    this.idleCheckInterval = null;
+    this.checkIntervalMs = 60000;
+    this.idleTimeoutMs = config.profileIdleTimeout;
+    this.startIdleCheck();
   }
 
   async getMonitorStateFilePath() {
@@ -31,7 +36,8 @@ class ProfileMonitorService {
           entityID: info.entityID,
           userID: info.userID,
           automationStatus: info.automationStatus || 'idle',
-          startTime: info.startTime
+          startTime: info.startTime,
+          lastIdleTime: info.lastIdleTime || null
         });
       }
 
@@ -100,7 +106,8 @@ class ProfileMonitorService {
         userID: userID || 'unknown',
         status: 'running',
         automationStatus: 'idle',
-        startTime: Date.now()
+        startTime: Date.now(),
+        lastIdleTime: Date.now()
       };
 
       browser.on('disconnected', async () => {
@@ -209,6 +216,8 @@ class ProfileMonitorService {
   }
 
   async stopAll() {
+    this.stopIdleCheck();
+    
     for (const [key, info] of this.monitoredProfiles.entries()) {
       if (info.browser && info.browser.isConnected()) {
         try {
@@ -261,7 +270,8 @@ class ProfileMonitorService {
           userID: savedProfile.userID || 'unknown',
           status: 'running',
           automationStatus: savedProfile.automationStatus || 'idle',
-          startTime: savedProfile.startTime || Date.now()
+          startTime: savedProfile.startTime || Date.now(),
+          lastIdleTime: savedProfile.lastIdleTime || (savedProfile.automationStatus === 'idle' ? Date.now() : null)
         };
 
         browser.on('disconnected', async () => {
@@ -304,7 +314,15 @@ class ProfileMonitorService {
       return false;
     }
 
+    const previousStatus = monitorInfo.automationStatus;
     monitorInfo.automationStatus = automationStatus;
+    
+    if (automationStatus === 'idle' && previousStatus !== 'idle') {
+      monitorInfo.lastIdleTime = Date.now();
+    } else if (automationStatus === 'running') {
+      monitorInfo.lastIdleTime = null;
+    }
+    
     return true;
   }
 
@@ -317,6 +335,65 @@ class ProfileMonitorService {
     }
 
     return monitorInfo.automationStatus || 'idle';
+  }
+
+  startIdleCheck() {
+    if (this.idleCheckInterval) {
+      return;
+    }
+
+    this.idleCheckInterval = setInterval(() => {
+      this.checkAndStopIdleProfiles().catch((error) => {
+        console.error(`[ProfileMonitor] Lỗi khi check idle profiles:`, error.message);
+      });
+    }, this.checkIntervalMs);
+  }
+
+  stopIdleCheck() {
+    if (this.idleCheckInterval) {
+      clearInterval(this.idleCheckInterval);
+      this.idleCheckInterval = null;
+    }
+  }
+
+  async checkAndStopIdleProfiles() {
+    const now = Date.now();
+    const profilesToStop = [];
+
+    for (const [key, monitorInfo] of this.monitoredProfiles.entries()) {
+      if (monitorInfo.status !== 'running') {
+        continue;
+      }
+
+      if (monitorInfo.automationStatus === 'idle' && monitorInfo.lastIdleTime) {
+        const idleDuration = now - monitorInfo.lastIdleTime;
+        
+        if (idleDuration >= this.idleTimeoutMs) {
+          profilesToStop.push({
+            key,
+            monitorInfo,
+            idleDuration: Math.round(idleDuration / 1000 / 60)
+          });
+        }
+      }
+    }
+
+    if (profilesToStop.length === 0) {
+      return;
+    }
+
+    for (const { key, monitorInfo, idleDuration } of profilesToStop) {
+      try {
+        await this.stopMonitoring(monitorInfo.userDataDir, monitorInfo.profileDirName);
+        
+        await stopChromeProfile({
+          userDataDir: monitorInfo.userDataDir,
+          profileDirName: monitorInfo.profileDirName
+        });
+      } catch (error) {
+        console.error(`[ProfileMonitor] ❌ Lỗi khi auto-stop profile ${key}:`, error.message);
+      }
+    }
   }
 }
 

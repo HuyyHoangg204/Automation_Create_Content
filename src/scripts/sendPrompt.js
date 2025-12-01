@@ -32,7 +32,6 @@ function hasContinueText(text) {
   const normalized = text.toLowerCase().trim();
   const continuePatterns = [
     'còn tiếp, gõ continue để tiếp tục',
-    'còn tiếp',
     'gõ continue để tiếp tục',
     'continue để tiếp tục',
     'continued, type continue to proceed'
@@ -1552,6 +1551,9 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt, onPro
               window.scrollTo(0, document.body.scrollHeight);
             });
             await new Promise((r) => setTimeout(r, 500));
+            
+            // Chờ 2 giây trước khi copy kịch bản để đảm bảo response đã render đầy đủ
+            await new Promise((r) => setTimeout(r, 2000));
             
             // Extract text from Gemini (sẽ tìm copy-button cuối cùng)
             const extractResult = await extractTextFromGemini(page, browser, userDataDir);
