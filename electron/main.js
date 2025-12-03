@@ -12,6 +12,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 // Load logService sau khi createRequire đã được định nghĩa
 const logService = require('../src/services/logService');
+const constants = require('../src/constants/constants');
 
 process.env.APP_ROOT = path.join(__dirname, '..')
 
@@ -22,8 +23,8 @@ export const RENDERER_DIST = path.join(process.env.APP_ROOT, 'dist')
 process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, 'public') : RENDERER_DIST
 
 // Backend API Configuration
-const BACKEND_API_URL = process.env.BACKEND_API_URL || 'http://localhost:8080'
-const BACKEND_API_KEY = process.env.BACKEND_API_KEY || ''
+const BACKEND_API_URL = constants.BACKEND_API_URL
+const BACKEND_API_KEY = constants.BACKEND_API_KEY || ''
 
 let win = null
 let apiServer = null
@@ -175,11 +176,11 @@ async function getOrCreateMachineId() {
 
 // Generate FRP client config
 async function generateFrpcConfig(machineId, apiPort) {
-  // Get config from env or use defaults
-  const serverAddr = process.env.FRP_SERVER_ADDR || '158.69.59.214'
-  const serverPort = process.env.FRP_SERVER_PORT || '7000'
-  const authToken = process.env.FRP_AUTH_TOKEN || 'your_secure_token_12345'
-  const subdomain = process.env.FRP_SUBDOMAIN || machineId.replace(/[^a-zA-Z0-9-]/g, '-')
+  // Get config from constants
+  const serverAddr = constants.FRP_SERVER_ADDR
+  const serverPort = constants.FRP_SERVER_PORT
+  const authToken = constants.FRP_AUTH_TOKEN
+  const subdomain = constants.FRP_SUBDOMAIN || machineId.replace(/[^a-zA-Z0-9-]/g, '-')
   
   // Generate config content
   // Note: log.to = "console" để log ra stdout (để có thể capture)
@@ -328,8 +329,8 @@ async function startTunnel() {
             tunnelUrl = urlMatch[0]
           } else {
             // Construct URL from config
-            const serverAddr = process.env.FRP_SERVER_ADDR || '158.69.59.214'
-            const subdomain = process.env.FRP_SUBDOMAIN || machineId.replace(/[^a-zA-Z0-9-]/g, '-')
+            const serverAddr = constants.FRP_SERVER_ADDR
+            const subdomain = constants.FRP_SUBDOMAIN || machineId.replace(/[^a-zA-Z0-9-]/g, '-')
             // Check if server has domain or use IP
             if (serverAddr.includes('.')) {
               // Assume it's a domain if it has dots and looks like domain
@@ -338,7 +339,7 @@ async function startTunnel() {
                 tunnelUrl = `http://${subdomain}.${serverAddr}`
               } else {
                 // IP address - check if subdomain host is configured
-                const subdomainHost = process.env.FRP_SUBDOMAIN_HOST || 'autogencontent.xyz'
+                const subdomainHost = constants.FRP_SUBDOMAIN_HOST
                 tunnelUrl = `http://${subdomain}.${subdomainHost}`
               }
             } else {
@@ -348,13 +349,14 @@ async function startTunnel() {
           
           // Register machine with backend và update tunnel URL (async, không await)
           if (tunnelUrl && currentMachineId) {
+            
             // Register machine first
             registerMachineWithBackend(currentMachineId, os.hostname()).catch(err => {
-              console.error('Failed to register machine:', err)
+              console.error('[Tunnel] Failed to register machine:', err)
             })
             // Update tunnel URL
             updateTunnelUrlToBackend(currentMachineId, tunnelUrl).catch(err => {
-              console.error('Failed to update tunnel URL:', err)
+              console.error('[Tunnel] Failed to update tunnel URL:', err)
             })
           }
         }
@@ -410,23 +412,30 @@ async function startTunnel() {
 // Register machine with backend
 async function registerMachineWithBackend(machineId, machineName) {
   try {
-    const response = await fetch(`${BACKEND_API_URL}/api/v1/machines/register`, {
+    const url = `${BACKEND_API_URL}/api/v1/machines/register`
+    const requestBody = {
+      machine_id: machineId,
+      name: machineName || os.hostname() || 'My Computer'
+    }
+    
+    
+    const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...(BACKEND_API_KEY && { 'X-API-Key': BACKEND_API_KEY })
       },
-      body: JSON.stringify({
-        machine_id: machineId,
-        name: machineName || os.hostname() || 'My Computer'
-      })
+      body: JSON.stringify(requestBody)
     })
+    
     
     if (!response.ok) {
       const error = await response.json()
+      
       // If machine already exists, that's OK
       if (response.status === 409 || response.status === 200) {
-        return error.box_id || (await response.json()).box_id
+        const boxId = error.box_id || error.data?.box_id
+        return boxId
       }
       throw new Error(error.error || 'Failed to register machine')
     }
@@ -434,7 +443,6 @@ async function registerMachineWithBackend(machineId, machineName) {
     const data = await response.json()
     return data.box_id
   } catch (error) {
-    console.error('Failed to register machine:', error)
     return null
   }
 }
@@ -463,24 +471,30 @@ async function getFrpConfigFromBackend(machineId) {
 // Update tunnel URL to backend
 async function updateTunnelUrlToBackend(machineId, tunnelUrl) {
   try {
-    const response = await fetch(`${BACKEND_API_URL}/api/v1/machines/${machineId}/tunnel-url`, {
+    const url = `${BACKEND_API_URL}/api/v1/machines/${machineId}/tunnel-url`
+    const requestBody = {
+      tunnel_url: tunnelUrl
+    }
+    
+    
+    const response = await fetch(url, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
         ...(BACKEND_API_KEY && { 'X-API-Key': BACKEND_API_KEY })
       },
-      body: JSON.stringify({
-        tunnel_url: tunnelUrl
-      })
+      body: JSON.stringify(requestBody)
     })
     
+    
     if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: 'Unknown error' }))
       throw new Error('Failed to update tunnel URL')
     }
     
-    return await response.json()
+    const data = await response.json()
+    return data
   } catch (error) {
-    console.error('Failed to update tunnel URL:', error)
     return null
   }
 }
@@ -488,27 +502,35 @@ async function updateTunnelUrlToBackend(machineId, tunnelUrl) {
 // Send heartbeat to backend
 async function sendHeartbeatToBackend(machineId, tunnelUrl, tunnelConnected, apiRunning, apiPort) {
   try {
-    const response = await fetch(`${BACKEND_API_URL}/api/v1/machines/${machineId}/heartbeat`, {
+    const url = `${BACKEND_API_URL}/api/v1/machines/${machineId}/heartbeat`
+    const requestBody = {
+      tunnel_url: tunnelUrl || '',
+      tunnel_connected: tunnelConnected,
+      api_running: apiRunning,
+      api_port: apiPort
+    }
+    
+    const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...(BACKEND_API_KEY && { 'X-API-Key': BACKEND_API_KEY })
       },
-      body: JSON.stringify({
-        tunnel_url: tunnelUrl || '',
-        tunnel_connected: tunnelConnected,
-        api_running: apiRunning,
-        api_port: apiPort
-      })
+      body: JSON.stringify(requestBody)
     })
     
+    
     if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: 'Unknown error' }))
+      console.log('[Heartbeat] Error Response:', JSON.stringify(errorData, null, 2))
       throw new Error('Failed to send heartbeat')
     }
     
-    return await response.json()
+    const data = await response.json()
+    console.log('[Heartbeat] Success Response:', JSON.stringify(data, null, 2))
+    return data
   } catch (error) {
-    console.error('Failed to send heartbeat:', error)
+    console.error('[Heartbeat] Exception:', error.message)
     return null
   }
 }

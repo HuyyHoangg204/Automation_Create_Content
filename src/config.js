@@ -1,8 +1,6 @@
 const path = require('path');
 const os = require('os');
-const dotenv = require('dotenv');
-
-dotenv.config();
+const constants = require('./constants/constants');
 
 // Get root directory - use __dirname if available (CommonJS), otherwise process.cwd()
 const rootDir = typeof __dirname !== 'undefined' 
@@ -30,7 +28,7 @@ module.exports = {
   rootDir,
   uploadDir: process.env.UPLOAD_DIR || path.join(rootDir, 'uploads'),
   defaultProfilesDir: getDefaultProfilesDir(),
-  profileIdleTimeout: parseInt(process.env.PROFILE_IDLE_TIMEOUT || '600000', 10),
+  profileIdleTimeout: constants.PROFILE_IDLE_TIMEOUT,
 };
 
 

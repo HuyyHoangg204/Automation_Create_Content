@@ -211,7 +211,7 @@ router.post('/gems', async (req, res, next) => {
         });
     } else {
       // Log warning cho các trường hợp khác
-      await logService.logWarning(finalEntityType, finalEntityID, finalUserID, 'gem_creating',
+      await logService.logError(finalEntityType, finalEntityID, finalUserID, 'gem_creating',
         `Gem creation không hoàn thành: status=${gemStatus}`, {
           gem_name: finalGemName,
           status: gemStatus,
