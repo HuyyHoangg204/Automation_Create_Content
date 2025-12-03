@@ -1,8 +1,8 @@
 module.exports = {
 	ACCOUNT_GOOGLE: [
 		{
-			email: '',
-			password: '',
+			email: '', // ggignore
+			password: '', // ggignore
 		},
 	],
 	
@@ -20,7 +20,7 @@ module.exports = {
 	// FRP Tunnel Configuration
 	FRP_SERVER_ADDR: '158.69.59.214',
 	FRP_SERVER_PORT: '7000',
-	FRP_AUTH_TOKEN: '',
+	FRP_AUTH_TOKEN: '', // ggignore
 	FRP_SUBDOMAIN: null, // Optional: custom subdomain, if null will use machineId
 	FRP_SUBDOMAIN_HOST: 'autogencontent.xyz', // Domain for subdomain routing
 	
