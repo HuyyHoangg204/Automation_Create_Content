@@ -1,5 +1,47 @@
 // Load environment variables from .env file
-require('dotenv').config();
+// Try multiple paths for .env file (dev and production)
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
+
+function loadEnvFile() {
+  const possiblePaths = [
+    // 1. Current working directory (dev mode)
+    path.join(process.cwd(), '.env'),
+    // 2. __dirname (if called from electron/main.js)
+    path.join(__dirname, '..', '..', '.env'),
+    // 3. Resources path (production - unpacked)
+    process.resourcesPath ? path.join(process.resourcesPath, '.env') : null,
+    // 4. App path (production - in app.asar)
+    process.env.APP_ROOT ? path.join(process.env.APP_ROOT, '.env') : null,
+    // 5. App.asar.unpacked
+    process.resourcesPath ? path.join(path.dirname(process.resourcesPath), 'app.asar.unpacked', '.env') : null,
+  ].filter(Boolean);
+
+  for (const envPath of possiblePaths) {
+    try {
+      if (fs.existsSync(envPath)) {
+        require('dotenv').config({ path: envPath });
+        console.log(`[Constants] Loaded .env from: ${envPath}`);
+        return envPath;
+      }
+    } catch (error) {
+      // Continue to next path
+    }
+  }
+
+  // Fallback: try default dotenv.config() (will look in process.cwd())
+  try {
+    require('dotenv').config();
+    console.log('[Constants] Loaded .env from default location (process.cwd())');
+  } catch (error) {
+    console.warn('[Constants] Could not load .env file, using defaults');
+  }
+  
+  return null;
+}
+
+loadEnvFile();
 
 module.exports = {
 	ACCOUNT_GOOGLE: [

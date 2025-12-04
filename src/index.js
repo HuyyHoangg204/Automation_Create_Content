@@ -17,7 +17,9 @@ const geminiRouter = require('./routes/gemini');
 const { notFoundHandler, errorHandler } = require('./middleware/errorHandler');
 
 async function createApp() {
-  await fs.ensureDir(uploadDir);
+  // Bỏ tạo uploadDir để tránh lỗi trong production (app.asar là read-only)
+  // Upload sẽ dùng defaultProfilesDir hoặc temp directory
+  // await fs.ensureDir(uploadDir);
 
   const app = express();
 

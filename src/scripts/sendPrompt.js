@@ -303,46 +303,119 @@ async function uploadFilesViaFileChooser(page, files) {
       window.__puppeteer_patched_input_click = originalClick;
     });
     
-    // Step 2: Click button to trigger Gemini to create input (but no OS dialog will open)
-    // Find and click upload button
-    const buttonFound = await page.evaluate(() => {
+    // Step 2: Scroll to input area first to ensure button is visible
+    await page.evaluate(() => {
+      window.scrollTo(0, document.body.scrollHeight);
+    });
+    await new Promise((r) => setTimeout(r, 1000));
+    
+    // Step 3: Wait for button to appear and click it
+    // Use waitForFunction to wait for button to be visible
+    const buttonFound = await page.waitForFunction(() => {
+      // Try multiple selectors including Vietnamese
       const selectors = [
+        // Vietnamese - exact match
+        'button[aria-label="Mở trình đơn tải tệp lên"]',
+        'button[aria-label*="Mở trình đơn tải tệp"]',
+        'button[aria-label*="mở trình đơn"]',
+        // English
         'button[aria-label="Open upload file menu"]',
         'button[aria-label*="upload" i]',
         'button[aria-label*="file" i]',
+        // By class
+        'button.upload-card-button',
+        'button[class*="upload-card-button"]',
       ];
       
       for (const sel of selectors) {
         const btn = document.querySelector(sel);
         if (btn && btn.offsetParent !== null) {
-          btn.click();
-          return true;
+          return btn;
         }
       }
-      return false;
-    });
+      
+      // Fallback: search all buttons for upload-related text or icon
+      const allButtons = Array.from(document.querySelectorAll('button'));
+      for (const btn of allButtons) {
+        if (btn.offsetParent === null) continue;
+        
+        const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+        const classes = (btn.className || '').toLowerCase();
+        const hasAddIcon = !!btn.querySelector('mat-icon[data-mat-icon-name="add_2"]');
+        const hasUploadClass = classes.includes('upload-card-button') || classes.includes('upload');
+        
+        if ((ariaLabel.includes('mở trình đơn tải tệp') || 
+             ariaLabel.includes('open upload file menu') ||
+             ariaLabel.includes('upload') ||
+             ariaLabel.includes('file') ||
+             (hasAddIcon && hasUploadClass))) {
+          return btn;
+        }
+      }
+      
+      return null;
+    }, { timeout: 10000 }).catch(() => null);
     
     if (!buttonFound) {
       return false;
     }
     
-    // Wait for menu to appear
+    // Click the button
+    await buttonFound.asElement().evaluate((btn) => {
+      btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      btn.focus();
+    });
     await new Promise((r) => setTimeout(r, 300));
+    await buttonFound.asElement().click();
     
-    // Click "Upload files" menu item
+    // Wait for menu to appear
+    await new Promise((r) => setTimeout(r, 800));
+    
+    // Click "Upload files" menu item (support both English and Vietnamese)
     const menuItemClicked = await page.evaluate(() => {
       const menuItems = [
+        // By data-test-id (most reliable)
         'button[data-test-id="local-images-files-uploader-button"]',
+        // Vietnamese - exact match
+        'button[aria-label="Tải tệp lên. Tài liệu, dữ liệu, tệp mã nguồn"]',
+        'button[aria-label*="Tải tệp lên"]',
+        'button[aria-label*="tải tệp"]',
+        // English
         'button[aria-label="Upload files"]',
+        'button[aria-label*="Upload" i]',
       ];
       
       for (const sel of menuItems) {
         const item = document.querySelector(sel);
-        if (item) {
+        if (item && item.offsetParent !== null) {
+          item.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          item.focus();
           item.click();
           return true;
         }
       }
+      
+      // Fallback: search all elements in menu for upload text
+      const allElements = Array.from(document.querySelectorAll('button, div[role="menuitem"], div[role="button"]'));
+      for (const el of allElements) {
+        if (el.offsetParent === null) continue;
+        
+        const text = (el.textContent || el.innerText || '').toLowerCase();
+        const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
+        const dataTestId = el.getAttribute('data-test-id') || '';
+        
+        if (dataTestId === 'local-images-files-uploader-button' ||
+            text.includes('tải tệp lên') ||
+            text.includes('upload files') ||
+            ariaLabel.includes('tải tệp lên') ||
+            ariaLabel.includes('upload files')) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          el.focus();
+          el.click();
+          return true;
+        }
+      }
+      
       return false;
     });
     
@@ -485,6 +558,7 @@ async function uploadFilesViaFileChooser(page, files) {
     const buttonClicked = await page.evaluate(() => {
       const selectors = [
         'button[aria-label="Open upload file menu"]',
+        'button[aria-label="Mở trình đơn tải tệp lên"]',
         'button[aria-label*="upload" i]',
       ];
       
@@ -766,6 +840,7 @@ async function uploadFilesViaFileChooser(page, files) {
       // Common selectors for upload button in chat interface
       const selectors = [
         'button[aria-label="Open upload file menu"]',
+        'button[aria-label="Mở trình đơn tải tệp lên"]',
         'button[aria-label*="upload" i]',
         'button[aria-label*="file" i]',
         'button[data-test-id*="upload"]',

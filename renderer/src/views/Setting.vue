@@ -61,58 +61,58 @@
           </div>
         </div>
         
-        <!-- AI Prompts Settings -->
+        <!-- Google Account Settings -->
         <div class="bg-[#0d1b2a] rounded-lg border border-gray-800 p-6">
           <h2 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
             </svg>
-            AI Prompts Configuration
+            Google Account Configuration
           </h2>
           
           <div class="space-y-6">
-            <!-- NotebookLM Prompt -->
+            <!-- Google Email -->
             <div>
               <label class="flex text-sm font-medium text-gray-400 mb-2 items-center gap-2">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
                 </svg>
-                NotebookLM Prompt
+                Google Account Email
               </label>
-              <textarea
-                v-model="notebookLMPrompt"
-                rows="6"
-                placeholder="Enter your NotebookLM prompt template here..."
-                class="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-sm text-gray-300 placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 resize-y font-mono"
-              ></textarea>
+              <input
+                v-model="googleEmail"
+                type="email"
+                placeholder="Enter your Google account email..."
+                class="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-sm text-gray-300 placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+              />
               <p class="text-xs text-gray-500 mt-2">
-                This prompt will be used when generating content with NotebookLM.
+                Email address for Google account (default from .env file).
               </p>
             </div>
 
-            <!-- Gemini Prompt -->
+            <!-- Google Password -->
             <div>
               <label class="flex text-sm font-medium text-gray-400 mb-2 items-center gap-2">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
                 </svg>
-                Gemini Prompt
+                Google Account Password
               </label>
-              <textarea
-                v-model="geminiPrompt"
-                rows="6"
-                placeholder="Enter your Gemini prompt template here..."
-                class="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-sm text-gray-300 placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 resize-y font-mono"
-              ></textarea>
+              <input
+                v-model="googlePassword"
+                type="password"
+                placeholder="Enter your Google account password..."
+                class="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-sm text-gray-300 placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+              />
               <p class="text-xs text-gray-500 mt-2">
-                This prompt will be used when generating content with Google Gemini.
+                Password for Google account (default from .env file).
               </p>
             </div>
 
             <!-- Save Button -->
             <div class="flex justify-end pt-4 border-t border-gray-800">
               <button
-                @click="savePrompts"
+                @click="saveGoogleAccount"
                 :disabled="isSaving"
                 class="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
               >
@@ -123,7 +123,7 @@
                   <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                   <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                 </svg>
-                {{ isSaving ? 'Saving...' : 'Save Prompts' }}
+                {{ isSaving ? 'Saving...' : 'Save Account' }}
               </button>
             </div>
           </div>
@@ -144,9 +144,9 @@ const toast = useToast()
 const profilesDirectory = ref('')
 const isLoading = ref(false)
 
-// AI Prompts
-const notebookLMPrompt = ref('')
-const geminiPrompt = ref('')
+// Google Account
+const googleEmail = ref('')
+const googlePassword = ref('')
 const isSaving = ref(false)
 
 onMounted(async () => {
@@ -175,8 +175,8 @@ async function loadSettings() {
       }
     }
     
-    // Load AI prompts from file
-    await loadPrompts()
+    // Load Google account from file or .env
+    await loadGoogleAccount()
   } catch (error) {
     console.error('Failed to load settings:', error)
     toast.add({
@@ -283,76 +283,76 @@ async function resetToDefault() {
   }
 }
 
-// Load prompts from file (C:\Users\tranh\AppData\Local\Automation_Profiles\prompts.json)
-async function loadPrompts() {
+// Load Google account from file or .env
+async function loadGoogleAccount() {
   try {
     if (window.ipcRenderer) {
-      const prompts = await window.ipcRenderer.invoke('prompts:get')
-      notebookLMPrompt.value = prompts.notebookLM || ''
-      geminiPrompt.value = prompts.gemini || ''
+      const account = await window.ipcRenderer.invoke('google-account:get')
+      googleEmail.value = account.email || ''
+      googlePassword.value = account.password || ''
     } else {
       // Fallback to localStorage if IPC not available
-      const savedNotebookLM = localStorage.getItem('notebooklm_prompt')
-      const savedGemini = localStorage.getItem('gemini_prompt')
+      const savedEmail = localStorage.getItem('google_account_email')
+      const savedPassword = localStorage.getItem('google_account_password')
       
-      if (savedNotebookLM) {
-        notebookLMPrompt.value = savedNotebookLM
+      if (savedEmail) {
+        googleEmail.value = savedEmail
       }
-      if (savedGemini) {
-        geminiPrompt.value = savedGemini
+      if (savedPassword) {
+        googlePassword.value = savedPassword
       }
     }
   } catch (error) {
-    console.error('Error loading prompts:', error)
+    console.error('Error loading Google account:', error)
     toast.add({
       severity: 'warn',
       summary: 'Load Failed',
-      detail: 'Using default prompts. Error: ' + error.message,
+      detail: 'Using default account from .env. Error: ' + error.message,
       life: 3000
     })
   }
 }
 
-// Save prompts to file (C:\Users\tranh\AppData\Local\Automation_Profiles\prompts.json)
-async function savePrompts() {
+// Save Google account to file
+async function saveGoogleAccount() {
   try {
     isSaving.value = true
     
     if (window.ipcRenderer) {
       // Save to file via IPC
-      const result = await window.ipcRenderer.invoke('prompts:save', {
-        notebookLM: notebookLMPrompt.value,
-        gemini: geminiPrompt.value
+      const result = await window.ipcRenderer.invoke('google-account:save', {
+        email: googleEmail.value,
+        password: googlePassword.value
       })
       
       if (result.success) {
         toast.add({
           severity: 'success',
-          summary: 'Prompts Saved',
-          detail: `Prompts saved to: ${result.path}`,
+          summary: 'Account Saved',
+          detail: `Google account saved to: ${result.path}`,
           life: 3000
         })
       } else {
-        throw new Error(result.error || 'Failed to save prompts')
+        throw new Error(result.error || 'Failed to save account')
       }
     } else {
       // Fallback to localStorage if IPC not available
-      localStorage.setItem('notebooklm_prompt', notebookLMPrompt.value)
-      localStorage.setItem('gemini_prompt', geminiPrompt.value)
+      localStorage.setItem('google_account_email', googleEmail.value)
+      localStorage.setItem('google_account_password', googlePassword.value)
       
       toast.add({
         severity: 'success',
-        summary: 'Prompts Saved',
-        detail: 'Prompts saved to local storage',
+        summary: 'Account Saved',
+        detail: 'Google account saved to local storage',
         life: 3000
       })
     }
   } catch (error) {
-    console.error('Error saving prompts:', error)
+    console.error('Error saving Google account:', error)
     toast.add({
       severity: 'error',
       summary: 'Save Failed',
-      detail: error.message || 'Failed to save prompts',
+      detail: error.message || 'Failed to save account',
       life: 3000
     })
   } finally {

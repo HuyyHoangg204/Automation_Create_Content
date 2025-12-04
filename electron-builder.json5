@@ -13,7 +13,12 @@
     "src/**/*",
     "electron/**/*.cjs",
     "electron/tunnel/**/*",
-    "node_modules/**/*"
+    "node_modules/**/*",
+    ".env"
+  ],
+  "asarUnpack": [
+    ".env",
+    "electron/tunnel/**/*"
   ],
   "mac": {
     "target": [

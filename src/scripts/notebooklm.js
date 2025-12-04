@@ -228,6 +228,82 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
           createClicked = true;
         }
       }
+      
+      // Priority 5: Try to find button by Vietnamese text "Tạo sổ ghi chú mới" (when no notebooks exist yet)
+      if (!createClicked) {
+        try {
+          // Wait a bit for page to fully load
+          await new Promise((r) => setTimeout(r, 1000));
+          
+          // Try to find mat-card with text "Tạo sổ ghi chú mới"
+          const vietnameseButton = await page.evaluateHandle(() => {
+            // Find all mat-cards with role="button"
+            const matCards = Array.from(document.querySelectorAll('mat-card[role="button"], mat-card'));
+            for (const card of matCards) {
+              const text = (card.textContent || card.innerText || '').trim();
+              // Check for Vietnamese text
+              if (text.includes('Tạo sổ ghi chú mới') || text.includes('tạo sổ ghi chú mới')) {
+                const style = window.getComputedStyle(card);
+                if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
+                  return card;
+                }
+              }
+            }
+            return null;
+          });
+          
+          if (vietnameseButton && vietnameseButton.asElement) {
+            const btnElement = vietnameseButton.asElement();
+            if (btnElement) {
+              const isVisible = await btnElement.isVisible();
+              if (isVisible) {
+                await btnElement.evaluate((el) => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+                await new Promise((r) => setTimeout(r, 500));
+                await btnElement.click({ timeout: 2000 });
+                createClicked = true;
+              }
+            }
+          } else if (vietnameseButton) {
+            // If asElement() doesn't work, try direct click
+            try {
+              await vietnameseButton.evaluate((el) => {
+                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                el.click();
+              });
+              createClicked = true;
+            } catch (e) {
+              logger.debug({ err: e }, 'notebooklm: failed to click Vietnamese button via evaluate');
+            }
+          }
+        } catch (e) {
+          logger.debug({ err: e }, 'notebooklm: failed to find/click Vietnamese "Tạo sổ ghi chú mới" button');
+        }
+      }
+      
+      // Priority 6: Try to find any mat-card with create-new-action-button class by text content
+      if (!createClicked) {
+        try {
+          const matCards = await page.$$('mat-card[role="button"], mat-card');
+          for (const card of matCards) {
+            const text = await card.evaluate((el) => (el.textContent || '').trim());
+            // Check for both English and Vietnamese
+            if (text.includes('Create new notebook') || 
+                text.includes('Tạo sổ ghi chú mới') ||
+                text.includes('tạo sổ ghi chú mới')) {
+              const isVisible = await card.isVisible();
+              if (isVisible) {
+                await card.evaluate((el) => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+                await new Promise((r) => setTimeout(r, 500));
+                await card.click({ timeout: 2000 });
+                createClicked = true;
+                break;
+              }
+            }
+          }
+        } catch (e) {
+          logger.debug({ err: e }, 'notebooklm: failed to click mat-card by text content');
+        }
+      }
 
       if (createClicked) {
         await new Promise((r) => setTimeout(r, 2000));
@@ -861,18 +937,95 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                     // Wait a bit more for response to fully render in DOM
                     await new Promise((r) => setTimeout(r, 2000));
                     
-                    // Scroll to bottom to ensure all content is loaded
+                    // Scroll down gradually to ensure copy button is visible
+                    // Scroll multiple times to handle lazy loading content
+                    for (let scrollAttempt = 0; scrollAttempt < 5; scrollAttempt++) {
+                      await page.evaluate(() => {
+                        window.scrollBy(0, window.innerHeight * 0.8);
+                      });
+                      await new Promise((r) => setTimeout(r, 500));
+                    }
+                    
+                    // Final scroll to absolute bottom
                     await page.evaluate(() => {
                       window.scrollTo(0, document.body.scrollHeight);
                     });
                     await new Promise((r) => setTimeout(r, 1000));
                     
-                    // Find and click the copy button
-                    const copyButton = await page.$('button[aria-label="Copy model response to clipboard"]');
+                    // Find copy button - specifically the "Copy model response" button, not summary copy button
+                    let copyButton = null;
+                    
+                    // Priority 1: Try exact English aria-label
+                    copyButton = await page.$('button[aria-label="Copy model response to clipboard"]');
+                    
+                    // Priority 2: Try Vietnamese aria-label with specific text "câu trả lời" (response)
+                    if (!copyButton) {
+                      copyButton = await page.$('button[aria-label*="Sao chép câu trả lời"], button[aria-label*="sao chép câu trả lời"]');
+                    }
+                    
+                    // Priority 3: Try Vietnamese with "mô hình" (model) to distinguish from summary copy
+                    if (!copyButton) {
+                      copyButton = await page.$('button[aria-label*="mô hình"], button[aria-label*="Mô hình"]');
+                    }
+                    
+                    // Priority 4: Search all buttons but filter for response copy button (not summary)
+                    if (!copyButton) {
+                      const buttonHandle = await page.evaluateHandle(() => {
+                        const buttons = Array.from(document.querySelectorAll('button'));
+                        for (const btn of buttons) {
+                          const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+                          // Must contain copy-related text
+                          const hasCopyText = ariaLabel.includes('copy') || ariaLabel.includes('sao chép') || 
+                                             ariaLabel.includes('clipboard') || ariaLabel.includes('bảng nhớ');
+                          // Must be response copy, not summary copy
+                          const isResponseCopy = ariaLabel.includes('model response') || 
+                                                ariaLabel.includes('câu trả lời') ||
+                                                ariaLabel.includes('mô hình');
+                          // Must NOT be summary copy
+                          const isNotSummary = !ariaLabel.includes('tóm tắt') && 
+                                              !ariaLabel.includes('summary') &&
+                                              !ariaLabel.includes('nội dung tóm tắt');
+                          
+                          if (hasCopyText && (isResponseCopy || (isNotSummary && ariaLabel.includes('bảng nhớ')))) {
+                            return btn;
+                          }
+                        }
+                        return null;
+                      });
+                      if (buttonHandle && buttonHandle.asElement) {
+                        copyButton = buttonHandle.asElement();
+                      } else if (buttonHandle) {
+                        copyButton = buttonHandle;
+                      }
+                    }
+                    
+                    // Priority 5: Try by class xap-copy-to-clipboard (specific to response copy)
+                    if (!copyButton) {
+                      copyButton = await page.$('button.xap-copy-to-clipboard');
+                    }
+                    
                     if (copyButton) {
-                      await copyButton.evaluate((el) => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
-                      await new Promise((r) => setTimeout(r, 500));
-                      await copyButton.click({ timeout: 2000 });
+                      // Scroll button into view
+                      await copyButton.evaluate((el) => {
+                        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                      });
+                      await new Promise((r) => setTimeout(r, 1000));
+                      
+                      // Check if button is visible and enabled
+                      const isVisible = await copyButton.evaluate((el) => {
+                        const rect = el.getBoundingClientRect();
+                        const style = window.getComputedStyle(el);
+                        return rect.width > 0 && rect.height > 0 && 
+                               style.visibility !== 'hidden' && 
+                               style.display !== 'none' &&
+                               !el.disabled;
+                      });
+                      
+                      if (isVisible) {
+                        await copyButton.click({ timeout: 3000 });
+                      } else {
+                        logger.warn({}, 'notebooklm: copy button found but not visible/enabled');
+                      }
                       
                       // Wait a bit for clipboard to be updated
                       await new Promise((r) => setTimeout(r, 500));

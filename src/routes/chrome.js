@@ -4,7 +4,7 @@ const { logger } = require('../logger');
 const { validateBody } = require('../middleware/validators');
 const { createChromeProfile, getChromePathFromEnvOrDefault, launchChromeProfile, listChromeProfiles, getChromeProfileById, stopChromeProfile, ensureGmailLogin, getProfilesBaseDir, setProfilesBaseDir } = require('../services/chrome');
 const { resolveUserDataDir, getProfileDirNameFromIndex } = require('../utils/resolveUserDataDir');
-const { ACCOUNT_GOOGLE } = require('../constants/constants');
+const { getGoogleAccount, getAllGoogleAccounts } = require('../utils/googleAccount');
 
 const logService = require('../services/logService');
 const entityContextService = require('../services/entityContext');
@@ -345,16 +345,22 @@ router.post('/profiles/login-gmail', validateBody(loginSchema), async (req, res,
     const { name, userDataDir, email, accountIndex, debugPort } = req.validatedBody;
     const base = name ? undefined : undefined; // placeholder for type consistency
     let credentials = null;
+    
+    // Get all available accounts (from saved file + constants)
+    const allAccounts = getAllGoogleAccounts();
+    
     if (email) {
-      const found = (ACCOUNT_GOOGLE || []).find((a) => a.email === email);
+      // Find by email
+      const found = allAccounts.find((a) => a.email === email);
       credentials = found || null;
     }
     if (!credentials) {
+      // Get by index (default to 0)
       const idx = Number.isInteger(accountIndex) ? accountIndex : 0;
-      credentials = (ACCOUNT_GOOGLE || [])[idx] || null;
+      credentials = allAccounts[idx] || null;
     }
     if (!credentials) {
-      return res.status(400).json({ error: 'NoCredentials', message: 'No Gmail credentials found in constants.' });
+      return res.status(400).json({ error: 'NoCredentials', message: 'No Gmail credentials found. Please configure in Settings.' });
     }
 
     // Resolve path if only name provided
