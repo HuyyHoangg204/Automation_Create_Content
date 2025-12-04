@@ -432,12 +432,10 @@ function getFrpcExecutable() {
   // Try each path
   for (const exePath of possiblePaths) {
     if (fs.existsSync(exePath)) {
-      writeLog('info', 'frpc executable found', { exePath })
       return exePath
     }
   }
   
-  writeLog('error', 'frpc executable not found in any location', { possiblePaths })
   return null
 }
 
@@ -472,44 +470,32 @@ async function killExistingFrpcProcesses() {
 // Start Tunnel Client (FRP)
 async function startTunnel() {
   try {
-    writeLog('info', 'Starting tunnel client...')
-    
     // 0. Kill existing frpc processes first
-    writeLog('info', 'Killing existing frpc processes...')
     await killExistingFrpcProcesses()
     await new Promise(resolve => setTimeout(resolve, 1000)) // Wait 1 second
     
     // 1. Get machine ID
-    writeLog('info', 'Getting machine ID...')
     const machineId = await getOrCreateMachineId()
     currentMachineId = machineId
-    writeLog('info', 'Machine ID obtained', { machineId })
     
     // 2. Get API port
     const backendRequire = createRequire(import.meta.url)
     const currentProjectRoot = app.isPackaged ? projectRoot : path.join(__dirname, '..')
     const config = backendRequire(path.join(currentProjectRoot, 'src', 'config.js'))
     const apiPort = config.port || 3000
-    writeLog('info', 'API port obtained', { apiPort })
     
     // 3. Generate frpc.toml config
-    writeLog('info', 'Generating FRP config...')
     const frpcConfig = await generateFrpcConfig(machineId, apiPort)
     const configPath = path.join(os.tmpdir(), `frpc-${machineId}.toml`)
     fs.writeFileSync(configPath, frpcConfig, 'utf8')
-    writeLog('info', 'FRP config generated', { configPath })
     
     // 4. Find frpc executable
-    writeLog('info', 'Looking for frpc executable...')
     const frpcPath = getFrpcExecutable()
     if (!frpcPath) {
-      writeLog('error', 'frpc executable not found')
       return
     }
-    writeLog('info', 'frpc executable found', { frpcPath })
     
     // 5. Spawn frpc process
-    writeLog('info', 'Spawning frpc process...')
     const { spawn } = await import('node:child_process')
     
     tunnelProcess = spawn(frpcPath, ['-c', configPath], {
@@ -521,29 +507,20 @@ async function startTunnel() {
       }
     })
     
-    writeLog('info', 'frpc process spawned', { pid: tunnelProcess.pid })
-    
     // 6. Handle stdout - parse public URL
     tunnelProcess.stdout.on('data', (data) => {
       const msg = data.toString()
       const lines = msg.split('\n').filter(line => line.trim())
       
       for (const line of lines) {
-        // Log all frpc output for debugging
-        if (line.trim()) {
-          writeLog('info', '[FRPC]', { line: line.trim() })
-        }
-        
         // Check connection status
         if (line.includes('login to server success') || line.includes('login success')) {
           tunnelConnected = true
-          writeLog('success', 'FRP tunnel connected to server')
         }
         
         // Check proxy start success
         if (line.includes('start proxy') && (line.includes('success') || line.includes('successfully'))) {
           tunnelConnected = true
-          writeLog('success', 'FRP proxy started successfully')
           
           // Try to extract URL from line or construct from config
           const urlMatch = line.match(/https?:\/\/[^\s]+/i)
@@ -571,19 +548,17 @@ async function startTunnel() {
           
           // Register machine with backend và update tunnel URL (async, không await)
           if (tunnelUrl && currentMachineId) {
-            writeLog('info', 'Registering machine and updating tunnel URL...', { tunnelUrl, machineId: currentMachineId })
-            
             // Register machine first
             registerMachineWithBackend(currentMachineId, os.hostname()).then(boxId => {
-              writeLog('success', 'Machine registered with backend', { boxId })
+              // Machine registered silently
             }).catch(err => {
-              writeLog('error', 'Failed to register machine', { error: err.message })
+              // Failed to register silently
             })
             // Update tunnel URL
             updateTunnelUrlToBackend(currentMachineId, tunnelUrl).then(() => {
-              writeLog('success', 'Tunnel URL updated to backend', { tunnelUrl })
+              // Tunnel URL updated silently
             }).catch(err => {
-              writeLog('error', 'Failed to update tunnel URL', { error: err.message })
+              // Failed to update tunnel URL silently
             })
           }
         }
@@ -593,7 +568,6 @@ async function startTunnel() {
             line.includes('start proxy failed') ||
             (line.includes('error') && !line.includes('success'))) {
           tunnelConnected = false
-          writeLog('error', 'FRP tunnel error detected', { line: line.trim() })
         }
       }
     })
@@ -613,31 +587,27 @@ async function startTunnel() {
     
     // 8. Handle process error (spawn failed)
     tunnelProcess.on('error', (error) => {
-      writeLog('error', 'FRP process error', { error: error.message })
       tunnelProcess = null
       tunnelConnected = false
     })
     
     // 9. Handle process exit
     tunnelProcess.on('exit', (code, signal) => {
-      writeLog('warn', 'FRP process exited', { code, signal })
       tunnelProcess = null
       tunnelConnected = false
       tunnelUrl = null
       
       // Auto restart nếu crash (trừ khi app đang quit)
       if (code !== 0 && code !== null && !isQuitting) {
-        writeLog('info', 'FRP process crashed, will restart in 5 seconds...')
         setTimeout(() => {
           if (!isQuitting && !app.isQuitting) {
-            writeLog('info', 'Restarting FRP tunnel...')
             startTunnel()
           }
         }, 5000)
       }
     })
   } catch (error) {
-    writeLog('error', 'Failed to start tunnel', { error: error.message, stack: error.stack })
+    // Failed to start tunnel silently
   }
 }
 
@@ -1023,7 +993,6 @@ app.whenReady().then(async () => {
   }
   
   // 3. Start Tunnel Client
-  writeLog('info', 'Step 4: Starting tunnel client...')
   startTunnel()
   
   // 4. Create Window (sau khi server đã start)
