@@ -10,10 +10,91 @@ import { randomUUID } from 'node:crypto'
 const require = createRequire(import.meta.url)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
-// Load logService sau khi createRequire đã được định nghĩa
-const logService = require('../src/services/logService');
+// Helper function to get correct paths (works in both dev and production)
+function getAppPaths() {
+  let projectRoot, srcPath, envPath
+  
+  if (app.isPackaged) {
+    // Production: use app.getAppPath() to get path to app.asar
+    projectRoot = app.getAppPath()
+    srcPath = path.join(projectRoot, 'src')
+    // .env is unpacked, so it's in app.asar.unpacked or resources
+    const resourcesPath = process.resourcesPath || path.join(path.dirname(projectRoot), '..', 'resources')
+    envPath = path.join(resourcesPath, '.env')
+    // Also try app.asar.unpacked
+    if (!fs.existsSync(envPath)) {
+      const unpackedPath = path.join(path.dirname(projectRoot), 'app.asar.unpacked', '.env')
+      if (fs.existsSync(unpackedPath)) {
+        envPath = unpackedPath
+      }
+    }
+  } else {
+    // Development: use __dirname
+    projectRoot = path.join(__dirname, '..')
+    srcPath = path.join(projectRoot, 'src')
+    envPath = path.join(projectRoot, '.env')
+  }
+  
+  return { projectRoot, srcPath, envPath }
+}
 
-process.env.APP_ROOT = path.join(__dirname, '..')
+// Initialize paths (will be updated in app.whenReady if needed)
+let { projectRoot, srcPath, envPath } = getAppPaths()
+process.env.APP_ROOT = projectRoot
+
+// Logging helper - write to file and console
+const logDir = path.join(os.homedir(), 'AppData', 'Local', 'Automation_Profiles', 'logs')
+const logFile = path.join(logDir, `app-${new Date().toISOString().split('T')[0]}.log`)
+
+// Ensure log directory exists
+try {
+  if (!fs.existsSync(logDir)) {
+    fs.mkdirSync(logDir, { recursive: true })
+  }
+} catch (e) {
+  // Ignore if can't create log dir
+}
+
+function writeLog(level, message, data = null) {
+  const timestamp = new Date().toISOString()
+  const logEntry = {
+    timestamp,
+    level,
+    message,
+    data
+  }
+  
+  // Write to file
+  try {
+    const logLine = `[${timestamp}] [${level}] ${message}${data ? ' ' + JSON.stringify(data) : ''}\n`
+    fs.appendFileSync(logFile, logLine, 'utf8')
+  } catch (e) {
+    // Ignore if can't write to file
+  }
+  
+  // Write to console
+  const consoleMessage = `[${level}] ${message}${data ? ' ' + JSON.stringify(data, null, 2) : ''}`
+  if (level === 'error') {
+    console.error(consoleMessage)
+  } else if (level === 'warn') {
+    console.warn(consoleMessage)
+  } else {
+    console.log(consoleMessage)
+  }
+  
+  // Send to renderer if window is ready
+  if (win && win.webContents && !win.webContents.isDestroyed()) {
+    try {
+      win.webContents.send('main-process-log', logEntry)
+    } catch (e) {
+      // Ignore if can't send to renderer
+    }
+  }
+}
+
+// Modules will be loaded in app.whenReady to avoid initialization errors
+// Don't load at top-level in production builds as it can cause circular dependency issues
+let logService, constants
 
 export const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL']
 export const MAIN_DIST = path.join(process.env.APP_ROOT, 'dist-electron')
@@ -21,9 +102,56 @@ export const RENDERER_DIST = path.join(process.env.APP_ROOT, 'dist')
 
 process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, 'public') : RENDERER_DIST
 
-// Backend API Configuration
-const BACKEND_API_URL = process.env.BACKEND_API_URL || 'http://localhost:8080'
-const BACKEND_API_KEY = process.env.BACKEND_API_KEY || ''
+// Backend API Configuration - lazy getters to avoid initialization error
+function getBackendApiUrl() {
+  if (!constants) {
+    return 'http://158.69.59.214:8080' // fallback
+  }
+  return constants.BACKEND_API_URL || 'http://158.69.59.214:8080'
+}
+
+function getBackendApiKey() {
+  if (!constants) {
+    return ''
+  }
+  return constants.BACKEND_API_KEY || ''
+}
+
+// FRP Configuration - lazy getters
+function getFrpServerAddr() {
+  if (!constants) {
+    return '158.69.59.214' // fallback
+  }
+  return constants.FRP_SERVER_ADDR || '158.69.59.214'
+}
+
+function getFrpServerPort() {
+  if (!constants) {
+    return '7000' // fallback
+  }
+  return constants.FRP_SERVER_PORT || '7000'
+}
+
+function getFrpAuthToken() {
+  if (!constants) {
+    return '' // fallback
+  }
+  return constants.FRP_AUTH_TOKEN || ''
+}
+
+function getFrpSubdomain() {
+  if (!constants) {
+    return null
+  }
+  return constants.FRP_SUBDOMAIN || null
+}
+
+function getFrpSubdomainHost() {
+  if (!constants) {
+    return 'autogencontent.xyz' // fallback
+  }
+  return constants.FRP_SUBDOMAIN_HOST || 'autogencontent.xyz'
+}
 
 let win = null
 let apiServer = null
@@ -36,24 +164,85 @@ let heartbeatInterval = null
 // Start Express API Server
 async function startAPIServer() {
   try {
-    // Use createRequire to load CommonJS modules from src/
-    // src/ has its own package.json with "type": "commonjs" to override parent
-    const backendRequire = createRequire(import.meta.url)
-    const projectRoot = path.join(__dirname, '..')
-    const srcPath = path.join(projectRoot, 'src')
+    writeLog('info', '🚀 Starting API server...')
     
-    // Load CommonJS modules directly
-    // src/package.json with "type": "commonjs" makes these files CommonJS
+    // Update paths if app is packaged
+    if (app.isPackaged) {
+      const paths = getAppPaths()
+      projectRoot = paths.projectRoot
+      srcPath = paths.srcPath
+      envPath = paths.envPath
+      process.env.APP_ROOT = projectRoot
+      writeLog('info', 'Updated paths for production', { projectRoot, srcPath, envPath })
+    }
+    
+    // Load modules if not loaded yet (should already be loaded in app.whenReady, but just in case)
+    if (!logService || !constants) {
+      writeLog('info', 'Loading modules in startAPIServer...')
+      try {
+        const backendRequire = createRequire(import.meta.url)
+        const currentSrcPath = app.isPackaged ? srcPath : path.join(__dirname, '..', 'src')
+        logService = backendRequire(path.join(currentSrcPath, 'services', 'logService'))
+        constants = backendRequire(path.join(currentSrcPath, 'constants', 'constants'))
+        writeLog('info', 'Modules loaded successfully')
+      } catch (error) {
+        writeLog('error', 'Failed to load modules', { error: error.message })
+        // Continue anyway, getters will use fallback values
+      }
+    }
+    
+    writeLog('info', 'Path information', {
+      __dirname,
+      projectRoot,
+      srcPath,
+      envPath,
+      isPackaged: app.isPackaged,
+      appPath: app.isPackaged ? app.getAppPath() : 'N/A',
+      resourcesPath: process.resourcesPath || 'N/A'
+    })
+    
+    // Check if srcPath exists
+    if (!fs.existsSync(srcPath)) {
+      throw new Error(`src/ folder not found at: ${srcPath}`)
+    }
+    writeLog('info', 'src/ folder exists', { srcPath })
+    
+    // Use createRequire to load CommonJS modules from src/
+    const backendRequire = createRequire(import.meta.url)
+    
+    writeLog('info', 'Loading backend modules...')
     const backend = backendRequire(path.join(srcPath, 'index.js'))
     const config = backendRequire(path.join(srcPath, 'config.js'))
     const { createApp } = backend
     const { port } = config
     
+    writeLog('info', 'Backend modules loaded', { port })
+    
+    writeLog('info', 'Creating Express app...')
     const expressApp = await createApp()
+    
+    writeLog('info', `Starting server on 127.0.0.1:${port}`)
     apiServer = expressApp.listen(port, '127.0.0.1', () => {
+      writeLog('success', `✅ Server started successfully on http://127.0.0.1:${port}`)
+    })
+    
+    apiServer.on('error', (error) => {
+      writeLog('error', '❌ Server error', { 
+        message: error.message, 
+        code: error.code,
+        stack: error.stack 
+      })
+      if (error.code === 'EADDRINUSE') {
+        writeLog('error', `Port ${port} is already in use`)
+      }
     })
   } catch (error) {
-    console.error('[API Server] ❌ Failed to start:', error)
+    writeLog('error', '❌ Failed to start API server', { 
+      message: error.message,
+      stack: error.stack,
+      srcPath,
+      projectRoot
+    })
   }
 }
 
@@ -175,11 +364,11 @@ async function getOrCreateMachineId() {
 
 // Generate FRP client config
 async function generateFrpcConfig(machineId, apiPort) {
-  // Get config from env or use defaults
-  const serverAddr = process.env.FRP_SERVER_ADDR || '158.69.59.214'
-  const serverPort = process.env.FRP_SERVER_PORT || '7000'
-  const authToken = process.env.FRP_AUTH_TOKEN || 'your_secure_token_12345'
-  const subdomain = process.env.FRP_SUBDOMAIN || machineId.replace(/[^a-zA-Z0-9-]/g, '-')
+  // Get config from constants using getters
+  const serverAddr = getFrpServerAddr()
+  const serverPort = getFrpServerPort()
+  const authToken = getFrpAuthToken()
+  const subdomain = getFrpSubdomain() || machineId.replace(/[^a-zA-Z0-9-]/g, '-')
   
   // Generate config content
   // Note: log.to = "console" để log ra stdout (để có thể capture)
@@ -210,26 +399,37 @@ function getFrpcExecutable() {
   const platform = process.platform
   const exeName = platform === 'win32' ? 'frpc.exe' : 'frpc'
   
-  // Get project root (works for both dev and build)
-  // In dev: __dirname = electron/
-  // In build: __dirname = dist-electron/
-  // We need to go up to project root
-  const projectRoot = path.join(__dirname, '..')
+  // In production: __dirname = app.asar/dist-electron
+  // In dev: __dirname = electron/ hoặc dist-electron/
   
-  // Try multiple locations (order matters)
-  const possiblePaths = [
+  // Try multiple locations (order matters - unpacked paths first for production)
+  const possiblePaths = []
+  
+  if (app.isPackaged) {
+    // Production mode: frpc.exe should be in app.asar.unpacked
+    const resourcesPath = process.resourcesPath || path.join(path.dirname(app.getAppPath()), '..', 'resources')
+    
+    // 1. app.asar.unpacked/electron/tunnel/ (production - unpacked)
+    const unpackedPath = path.join(resourcesPath, 'app.asar.unpacked', 'electron', 'tunnel', exeName)
+    possiblePaths.push(unpackedPath)
+    
+    // 2. resources/electron/tunnel/ (alternative location)
+    possiblePaths.push(path.join(resourcesPath, 'electron', 'tunnel', exeName))
+  } else {
+    // Development mode
+    const projectRoot = path.join(__dirname, '..')
+    
     // 1. electron/tunnel/ (dev mode)
-    path.join(projectRoot, 'electron', 'tunnel', exeName),
+    possiblePaths.push(path.join(projectRoot, 'electron', 'tunnel', exeName))
+    
     // 2. dist-electron/tunnel/ (build mode - if copied)
-    path.join(__dirname, 'tunnel', exeName),
+    possiblePaths.push(path.join(__dirname, 'tunnel', exeName))
+    
     // 3. frp_0.65.0_windows_amd64/ (fallback)
-    path.join(projectRoot, 'frp_0.65.0_windows_amd64', exeName),
-    // 4. resources/electron/tunnel/ (packaged app)
-    path.join(process.resourcesPath || projectRoot, 'electron', 'tunnel', exeName),
-    // 5. app.asar.unpacked/electron/tunnel/ (if unpacked)
-    path.join(projectRoot, '..', 'app.asar.unpacked', 'electron', 'tunnel', exeName),
-  ]
+    possiblePaths.push(path.join(projectRoot, 'frp_0.65.0_windows_amd64', exeName))
+  }
   
+  // Try each path
   for (const exePath of possiblePaths) {
     if (fs.existsSync(exePath)) {
       return exePath
@@ -280,8 +480,8 @@ async function startTunnel() {
     
     // 2. Get API port
     const backendRequire = createRequire(import.meta.url)
-    const projectRoot = path.join(__dirname, '..')
-    const config = backendRequire(path.join(projectRoot, 'src', 'config.js'))
+    const currentProjectRoot = app.isPackaged ? projectRoot : path.join(__dirname, '..')
+    const config = backendRequire(path.join(currentProjectRoot, 'src', 'config.js'))
     const apiPort = config.port || 3000
     
     // 3. Generate frpc.toml config
@@ -328,8 +528,8 @@ async function startTunnel() {
             tunnelUrl = urlMatch[0]
           } else {
             // Construct URL from config
-            const serverAddr = process.env.FRP_SERVER_ADDR || '158.69.59.214'
-            const subdomain = process.env.FRP_SUBDOMAIN || machineId.replace(/[^a-zA-Z0-9-]/g, '-')
+            const serverAddr = getFrpServerAddr()
+            const subdomain = getFrpSubdomain() || machineId.replace(/[^a-zA-Z0-9-]/g, '-')
             // Check if server has domain or use IP
             if (serverAddr.includes('.')) {
               // Assume it's a domain if it has dots and looks like domain
@@ -338,7 +538,7 @@ async function startTunnel() {
                 tunnelUrl = `http://${subdomain}.${serverAddr}`
               } else {
                 // IP address - check if subdomain host is configured
-                const subdomainHost = process.env.FRP_SUBDOMAIN_HOST || 'autogencontent.xyz'
+                const subdomainHost = getFrpSubdomainHost()
                 tunnelUrl = `http://${subdomain}.${subdomainHost}`
               }
             } else {
@@ -349,12 +549,16 @@ async function startTunnel() {
           // Register machine with backend và update tunnel URL (async, không await)
           if (tunnelUrl && currentMachineId) {
             // Register machine first
-            registerMachineWithBackend(currentMachineId, os.hostname()).catch(err => {
-              console.error('Failed to register machine:', err)
+            registerMachineWithBackend(currentMachineId, os.hostname()).then(boxId => {
+              // Machine registered silently
+            }).catch(err => {
+              // Failed to register silently
             })
             // Update tunnel URL
-            updateTunnelUrlToBackend(currentMachineId, tunnelUrl).catch(err => {
-              console.error('Failed to update tunnel URL:', err)
+            updateTunnelUrlToBackend(currentMachineId, tunnelUrl).then(() => {
+              // Tunnel URL updated silently
+            }).catch(err => {
+              // Failed to update tunnel URL silently
             })
           }
         }
@@ -403,30 +607,37 @@ async function startTunnel() {
       }
     })
   } catch (error) {
-    // Failed to start tunnel
+    // Failed to start tunnel silently
   }
 }
 
 // Register machine with backend
 async function registerMachineWithBackend(machineId, machineName) {
   try {
-    const response = await fetch(`${BACKEND_API_URL}/api/v1/machines/register`, {
+    const url = `${getBackendApiUrl()}/api/v1/machines/register`
+    const requestBody = {
+      machine_id: machineId,
+      name: machineName || os.hostname() || 'My Computer'
+    }
+    
+    const apiKey = getBackendApiKey()
+    const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(BACKEND_API_KEY && { 'X-API-Key': BACKEND_API_KEY })
+        ...(apiKey && { 'X-API-Key': apiKey })
       },
-      body: JSON.stringify({
-        machine_id: machineId,
-        name: machineName || os.hostname() || 'My Computer'
-      })
+      body: JSON.stringify(requestBody)
     })
+    
     
     if (!response.ok) {
       const error = await response.json()
+      
       // If machine already exists, that's OK
       if (response.status === 409 || response.status === 200) {
-        return error.box_id || (await response.json()).box_id
+        const boxId = error.box_id || error.data?.box_id
+        return boxId
       }
       throw new Error(error.error || 'Failed to register machine')
     }
@@ -434,7 +645,6 @@ async function registerMachineWithBackend(machineId, machineName) {
     const data = await response.json()
     return data.box_id
   } catch (error) {
-    console.error('Failed to register machine:', error)
     return null
   }
 }
@@ -442,10 +652,11 @@ async function registerMachineWithBackend(machineId, machineName) {
 // Get FRP config from backend
 async function getFrpConfigFromBackend(machineId) {
   try {
-    const response = await fetch(`${BACKEND_API_URL}/api/v1/machines/${machineId}/frp-config`, {
+    const apiKey = getBackendApiKey()
+    const response = await fetch(`${getBackendApiUrl()}/api/v1/machines/${machineId}/frp-config`, {
       method: 'GET',
       headers: {
-        ...(BACKEND_API_KEY && { 'X-API-Key': BACKEND_API_KEY })
+        ...(apiKey && { 'X-API-Key': apiKey })
       }
     })
     
@@ -463,24 +674,30 @@ async function getFrpConfigFromBackend(machineId) {
 // Update tunnel URL to backend
 async function updateTunnelUrlToBackend(machineId, tunnelUrl) {
   try {
-    const response = await fetch(`${BACKEND_API_URL}/api/v1/machines/${machineId}/tunnel-url`, {
+    const url = `${getBackendApiUrl()}/api/v1/machines/${machineId}/tunnel-url`
+    const requestBody = {
+      tunnel_url: tunnelUrl
+    }
+    
+    const apiKey = getBackendApiKey()
+    const response = await fetch(url, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
-        ...(BACKEND_API_KEY && { 'X-API-Key': BACKEND_API_KEY })
+        ...(apiKey && { 'X-API-Key': apiKey })
       },
-      body: JSON.stringify({
-        tunnel_url: tunnelUrl
-      })
+      body: JSON.stringify(requestBody)
     })
     
+    
     if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: 'Unknown error' }))
       throw new Error('Failed to update tunnel URL')
     }
     
-    return await response.json()
+    const data = await response.json()
+    return data
   } catch (error) {
-    console.error('Failed to update tunnel URL:', error)
     return null
   }
 }
@@ -488,27 +705,36 @@ async function updateTunnelUrlToBackend(machineId, tunnelUrl) {
 // Send heartbeat to backend
 async function sendHeartbeatToBackend(machineId, tunnelUrl, tunnelConnected, apiRunning, apiPort) {
   try {
-    const response = await fetch(`${BACKEND_API_URL}/api/v1/machines/${machineId}/heartbeat`, {
+    const url = `${getBackendApiUrl()}/api/v1/machines/${machineId}/heartbeat`
+    const requestBody = {
+      tunnel_url: tunnelUrl || '',
+      tunnel_connected: tunnelConnected,
+      api_running: apiRunning,
+      api_port: apiPort
+    }
+    
+    const apiKey = getBackendApiKey()
+    const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...(BACKEND_API_KEY && { 'X-API-Key': BACKEND_API_KEY })
+        ...(apiKey && { 'X-API-Key': apiKey })
       },
-      body: JSON.stringify({
-        tunnel_url: tunnelUrl || '',
-        tunnel_connected: tunnelConnected,
-        api_running: apiRunning,
-        api_port: apiPort
-      })
+      body: JSON.stringify(requestBody)
     })
     
+    
     if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: 'Unknown error' }))
+      console.log('[Heartbeat] Error Response:', JSON.stringify(errorData, null, 2))
       throw new Error('Failed to send heartbeat')
     }
     
-    return await response.json()
+    const data = await response.json()
+    console.log('[Heartbeat] Success Response:', JSON.stringify(data, null, 2))
+    return data
   } catch (error) {
-    console.error('Failed to send heartbeat:', error)
+    console.error('[Heartbeat] Exception:', error.message)
     return null
   }
 }
@@ -605,6 +831,58 @@ ipcMain.handle('prompts:save', async (event, prompts) => {
   }
 })
 
+// Read Google account from file
+function readGoogleAccountFile() {
+  try {
+    const filePath = path.join(os.homedir(), 'AppData', 'Local', 'Automation_Profiles', 'google-account.json')
+    if (fs.existsSync(filePath)) {
+      const data = fs.readFileSync(filePath, 'utf8')
+      return JSON.parse(data)
+    }
+  } catch (error) {
+    // Error reading file
+  }
+  // Fallback to constants from .env
+  if (constants && constants.ACCOUNT_GOOGLE && constants.ACCOUNT_GOOGLE.length > 0) {
+    const account = constants.ACCOUNT_GOOGLE[0]
+    return {
+      email: account.email || '',
+      password: account.password || ''
+    }
+  }
+  return { email: '', password: '' }
+}
+
+// IPC Handlers for Google Account
+ipcMain.handle('google-account:get', async () => {
+  try {
+    return readGoogleAccountFile()
+  } catch (error) {
+    writeLog('error', 'Failed to get Google account', { error: error.message })
+    return { email: '', password: '' }
+  }
+})
+
+ipcMain.handle('google-account:save', async (event, account) => {
+  try {
+    // Save to file (same location as prompts.json)
+    const filePath = path.join(os.homedir(), 'AppData', 'Local', 'Automation_Profiles', 'google-account.json')
+    const dir = path.dirname(filePath)
+    
+    // Create directory if it doesn't exist
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true })
+    }
+    
+    // Write file
+    fs.writeFileSync(filePath, JSON.stringify(account, null, 2), 'utf8')
+    return { success: true, path: filePath }
+  } catch (error) {
+    writeLog('error', 'Failed to save Google account', { error: error.message })
+    return { success: false, error: error.message }
+  }
+})
+
 // IPC Handlers for API status
 ipcMain.handle('api:status', async () => {
   try {
@@ -653,47 +931,97 @@ app.on('activate', () => {
 })
 
 app.whenReady().then(async () => {
+  writeLog('info', 'App is ready, starting initialization...')
+  
+  // Update paths if needed (for production)
+  if (app.isPackaged) {
+    const paths = getAppPaths()
+    projectRoot = paths.projectRoot
+    srcPath = paths.srcPath
+    envPath = paths.envPath
+    process.env.APP_ROOT = projectRoot
+    writeLog('info', 'Paths updated for production', { projectRoot, srcPath, envPath })
+  }
+  
+  // Always load modules in app.whenReady (not at top-level to avoid initialization errors)
+  if (!logService || !constants) {
+    writeLog('info', 'Loading modules in app.whenReady...')
+    try {
+      const backendRequire = createRequire(import.meta.url)
+      const currentSrcPath = app.isPackaged ? srcPath : path.join(__dirname, '..', 'src')
+      logService = backendRequire(path.join(currentSrcPath, 'services', 'logService'))
+      constants = backendRequire(path.join(currentSrcPath, 'constants', 'constants'))
+      writeLog('success', 'Modules loaded successfully', { srcPath: currentSrcPath })
+    } catch (error) {
+      writeLog('error', 'Failed to load modules', { error: error.message, stack: error.stack })
+      // Don't throw, let app continue with fallback values
+    }
+  }
+  
   // 1. Start API Server first
+  writeLog('info', 'Step 1: Starting API Server...')
   await startAPIServer()
   
   // Đợi một chút để đảm bảo server đã sẵn sàng
   await new Promise(resolve => setTimeout(resolve, 500))
   
-  await initializeLogService();
+  // Initialize log service
+  writeLog('info', 'Step 2: Initializing log service...')
+  try {
+    await initializeLogService()
+    writeLog('success', 'Log service initialized')
+  } catch (error) {
+    writeLog('error', 'Failed to initialize log service', { error: error.message })
+  }
   
   // 2. Recover monitoring state (sau khi API server start)
+  writeLog('info', 'Step 3: Recovering profile monitoring...')
   const backendRequire = createRequire(import.meta.url)
-  const projectRoot = path.join(__dirname, '..')
+  const currentProjectRoot = app.isPackaged ? projectRoot : path.join(__dirname, '..')
   try {
-    const profileMonitorService = backendRequire(path.join(projectRoot, 'src', 'services', 'profileMonitor.js'))
+    const profileMonitorService = backendRequire(path.join(currentProjectRoot, 'src', 'services', 'profileMonitor.js'))
     setTimeout(async () => {
-      await profileMonitorService.recoverMonitoring()
+      try {
+        await profileMonitorService.recoverMonitoring()
+        writeLog('success', 'Profile monitoring recovered')
+      } catch (error) {
+        writeLog('error', 'Failed to recover profile monitoring', { error: error.message })
+      }
     }, 2000)
   } catch (error) {
-    console.error('[ProfileMonitor] Error recovering:', error)
+    writeLog('error', 'Error loading profile monitor service', { error: error.message })
   }
   
   // 3. Start Tunnel Client
   startTunnel()
   
   // 4. Create Window (sau khi server đã start)
+  writeLog('info', 'Step 5: Creating window...')
   createWindow()
   
   // 5. Start heartbeat interval (gửi mỗi 30 giây)
-  const config = backendRequire(path.join(projectRoot, 'src', 'config.js'))
-  const apiPort = config.port || 3000
+  writeLog('info', 'Step 6: Setting up heartbeat interval...')
+  try {
+    const config = backendRequire(path.join(currentProjectRoot, 'src', 'config.js'))
+    const apiPort = config.port || 3000
+    
+    heartbeatInterval = setInterval(async () => {
+      if (currentMachineId) {
+        await sendHeartbeatToBackend(
+          currentMachineId,
+          tunnelUrl || '',
+          tunnelConnected,
+          !!apiServer,
+          apiPort
+        )
+      }
+    }, 30000) // 30 seconds
+    writeLog('success', 'Heartbeat interval started (30s)')
+  } catch (error) {
+    writeLog('error', 'Failed to setup heartbeat', { error: error.message })
+  }
   
-  heartbeatInterval = setInterval(async () => {
-    if (currentMachineId) {
-      await sendHeartbeatToBackend(
-        currentMachineId,
-        tunnelUrl || '',
-        tunnelConnected,
-        !!apiServer,
-        apiPort
-      )
-    }
-  }, 30000) // 30 seconds
+  writeLog('success', '✅ App initialization completed')
   
   // Register keyboard shortcuts for DevTools
   // F12 or Ctrl+Shift+I to toggle DevTools

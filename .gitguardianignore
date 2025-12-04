@@ -1,0 +1,4 @@
+# GitGuardian ignore file
+# Ignore the constants file that contains configuration values (not real secrets)
+src/constants/constants.js
+

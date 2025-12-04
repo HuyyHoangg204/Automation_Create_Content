@@ -431,13 +431,13 @@ async function createGem({ userDataDir, name, description, instructions, knowled
       return { status };
     }
 
-    // Debug: Check if Explore Gems button exists
-    logger.info({}, '[Gemini] Looking for Explore Gems button');
-    const exploreGemsInfo = await page.evaluate(() => {
+    // Debug: Check if bot list side nav entry button exists
+    logger.info({}, '[Gemini] Looking for bot list side nav entry button');
+    const botListButtonInfo = await page.evaluate(() => {
       const selectors = [
-        'button[aria-label="Explore Gems"]',
-        'button[aria-label*="Explore Gems" i]',
-        '[aria-label="Explore Gems"]',
+        'side-nav-entry-button[data-test-id="bot-list-side-nav-entry-button"]',
+        '[data-test-id="bot-list-side-nav-entry-button"]',
+        'side-nav-entry-button',
       ];
       const results = {};
       for (const sel of selectors) {
@@ -445,50 +445,91 @@ async function createGem({ userDataDir, name, description, instructions, knowled
         results[sel] = els.map(el => ({
           visible: el.offsetParent !== null,
           text: (el.textContent || el.innerText || '').trim(),
-          ariaLabel: el.getAttribute('aria-label'),
+          dataTestId: el.getAttribute('data-test-id'),
           disabled: el.disabled || el.getAttribute('aria-disabled') === 'true',
           tagName: el.tagName,
           className: el.className
         }));
       }
-      // Also check by text
-      const allButtons = Array.from(document.querySelectorAll('button, [role="button"], a, span, div'));
-      const exploreTexts = allButtons.filter(el => {
-        const text = (el.textContent || el.innerText || '').trim();
-        return /explore gems|khám phá gems/i.test(text);
-      }).map(el => ({
-        visible: el.offsetParent !== null,
-        text: (el.textContent || el.innerText || '').trim(),
-        ariaLabel: el.getAttribute('aria-label'),
-        tagName: el.tagName,
-        className: el.className
-      }));
-      results.byText = exploreTexts;
       return results;
     });
-    logger.info({ exploreGemsInfo }, '[Gemini] Explore Gems button search results');
+    logger.info({ botListButtonInfo }, '[Gemini] Bot list side nav entry button search results');
 
-    // Click Explore Gems in the sidebar (prefer aria-label selector to avoid accidental matches)
-    logger.info({}, '[Gemini] Attempting to click Explore Gems by selectors');
-    const clickedExploreBySelectors = await clickSelectors(page, [
-      'button[aria-label="Explore Gems"]',
-      'button[aria-label*="Explore Gems" i]',
-      '[aria-label="Explore Gems"]',
-    ], { timeoutMs: 12000 });
-    logger.info({ clickedExploreBySelectors }, '[Gemini] Click Explore Gems by selectors result');
+    // Click bot list side nav entry button (new UI - replaces Explore Gems)
+    // IMPORTANT: Only click element with exact data-test-id="bot-list-side-nav-entry-button"
+    logger.info({}, '[Gemini] Attempting to click bot list side nav entry button by selectors');
+    
+    // Use explicit selector with exact data-test-id match
+    let clickedExploreBySelectors = false;
+    try {
+      // Wait for the specific button to appear
+      const botListButton = await page.waitForSelector(
+        'side-nav-entry-button[data-test-id="bot-list-side-nav-entry-button"]',
+        { timeout: 12000, visible: true }
+      ).catch(() => null);
+      
+      if (botListButton) {
+        // Verify it has the correct data-test-id before clicking
+        const dataTestId = await botListButton.evaluate((el) => el.getAttribute('data-test-id'));
+        if (dataTestId === 'bot-list-side-nav-entry-button') {
+          await botListButton.evaluate((el) => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+          await new Promise((r) => setTimeout(r, 300));
+          await botListButton.click({ timeout: 2000 });
+          clickedExploreBySelectors = true;
+          logger.info({ dataTestId }, '[Gemini] Successfully clicked bot-list-side-nav-entry-button');
+        } else {
+          logger.warn({ dataTestId }, '[Gemini] Found button but data-test-id does not match');
+        }
+      }
+    } catch (e) {
+      logger.debug({ err: e }, '[Gemini] Error clicking bot-list-side-nav-entry-button');
+    }
+    
+    // Fallback: try generic selector but verify data-test-id
+    if (!clickedExploreBySelectors) {
+      try {
+        const allButtons = await page.$$('side-nav-entry-button');
+        for (const btn of allButtons) {
+          const dataTestId = await btn.evaluate((el) => el.getAttribute('data-test-id'));
+          if (dataTestId === 'bot-list-side-nav-entry-button') {
+            const isVisible = await btn.isVisible();
+            if (isVisible) {
+              await btn.evaluate((el) => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+              await new Promise((r) => setTimeout(r, 300));
+              await btn.click({ timeout: 2000 });
+              clickedExploreBySelectors = true;
+              logger.info({}, '[Gemini] Successfully clicked bot-list-side-nav-entry-button via fallback');
+              break;
+            }
+          }
+        }
+      } catch (e) {
+        logger.debug({ err: e }, '[Gemini] Error in fallback click');
+      }
+    }
+    
+    logger.info({ clickedExploreBySelectors }, '[Gemini] Click bot list side nav entry button by selectors result');
     
     let clickedExplore = clickedExploreBySelectors;
     if (!clickedExplore) {
-      logger.info({}, '[Gemini] Selectors failed, trying to click by text');
-      clickedExplore = await clickByText(page, ['Explore Gems', 'Khám phá Gems'], { timeoutMs: 8000 });
-      logger.info({ clickedExplore }, '[Gemini] Click Explore Gems by text result');
+      logger.info({}, '[Gemini] Selectors failed, trying fallback selectors');
+      // Fallback: try old Explore Gems selectors in case UI hasn't fully updated
+      clickedExplore = await clickSelectors(page, [
+        'button[aria-label="Explore Gems"]',
+        'button[aria-label*="Explore Gems" i]',
+        '[aria-label="Explore Gems"]',
+      ], { timeoutMs: 5000 });
+      if (!clickedExplore) {
+        clickedExplore = await clickByText(page, ['Explore Gems', 'Khám phá Gems'], { timeoutMs: 5000 });
+      }
+      logger.info({ clickedExplore }, '[Gemini] Fallback click result');
     }
-    logger.info({ clickedExplore }, '[Gemini] Explore Gems clicked, waiting for navigation');
+    logger.info({ clickedExplore }, '[Gemini] Bot list button clicked, waiting for navigation');
     await Promise.race([
       page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {}),
       new Promise((r) => setTimeout(r, 1200)),
     ]);
-    logger.info({ url: page.url() }, '[Gemini] After Explore Gems navigation');
+    logger.info({ url: page.url() }, '[Gemini] After bot list navigation');
 
     // Try click New Gem button inside Gem manager
     let clickedNew = false;

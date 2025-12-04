@@ -1,4 +1,5 @@
 const amqp = require('amqplib');
+const constants = require('../constants/constants');
 
 class LogService {
   constructor() {
@@ -6,8 +7,8 @@ class LogService {
     this.channel = null;
     this.queueName = 'process_logs';
     this.machineId = null; // Sẽ được set từ main.js
-    this.backendApiUrl = process.env.BACKEND_API_URL || 'http://localhost:8080';
-    this.useRabbitMQ = process.env.USE_RABBITMQ !== 'false'; // Default: true
+    this.backendApiUrl = constants.BACKEND_API_URL;
+    this.useRabbitMQ = constants.USE_RABBITMQ;
   }
 
   // Set machine ID (gọi từ main.js sau khi có machine ID)
@@ -23,10 +24,10 @@ class LogService {
     }
 
     try {
-      const rabbitMQHost = process.env.RABBITMQ_HOST || 'localhost';
-      const rabbitMQPort = process.env.RABBITMQ_PORT || '5672';
-      const rabbitMQUser = process.env.RABBITMQ_USER || 'guest';
-      const rabbitMQPass = process.env.RABBITMQ_PASS || 'guest';
+      const rabbitMQHost = constants.RABBITMQ_HOST;
+      const rabbitMQPort = constants.RABBITMQ_PORT;
+      const rabbitMQUser = constants.RABBITMQ_USER;
+      const rabbitMQPass = constants.RABBITMQ_PASS;
       
       const url = `amqp://${rabbitMQUser}:${rabbitMQPass}@${rabbitMQHost}:${rabbitMQPort}/`;
       

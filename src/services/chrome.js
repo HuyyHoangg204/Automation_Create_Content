@@ -224,8 +224,8 @@ async function launchChromeProfile({ name, userDataDir, profileDirName = 'Defaul
   let gmailCheckStatus = 'skipped';
   if (ensureGmail) {
     try {
-      const { ACCOUNT_GOOGLE } = require('../constants/constants');
-      const cred = Array.isArray(ACCOUNT_GOOGLE) && ACCOUNT_GOOGLE.length > 0 ? ACCOUNT_GOOGLE[0] : null;
+      const { getGoogleAccount } = require('../utils/googleAccount');
+      const cred = getGoogleAccount(); // This will get from saved file first, then constants
       if (cred) {
         const out = await ensureGmailLoggedInScript({ 
           userDataDir: resolvedUserDataDir, 

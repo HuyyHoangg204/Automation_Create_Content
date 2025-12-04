@@ -234,12 +234,13 @@ async function executeSteps(steps = [], context = {}) {
 
         case 'ensure-gmail-login': {
           // Ensure Gmail is logged in (try to login if not)
-          const { ACCOUNT_GOOGLE } = require('../constants/constants');
+          const { getGoogleAccount } = require('../utils/googleAccount');
+          const defaultCred = getGoogleAccount(); // Get from saved file first, then constants
           const ensureParams = {
             userDataDir: stepParams.userDataDir || context.userDataDir,
             debugPort: stepParams.debugPort || context.debugPort ? parseInt(context.debugPort, 10) : undefined,
-            email: stepParams.email || context.email || (ACCOUNT_GOOGLE && ACCOUNT_GOOGLE[0]?.email),
-            password: stepParams.password || context.password || (ACCOUNT_GOOGLE && ACCOUNT_GOOGLE[0]?.password)
+            email: stepParams.email || context.email || (defaultCred?.email || ''),
+            password: stepParams.password || context.password || (defaultCred?.password || '')
           };
 
           if (!ensureParams.userDataDir) {
