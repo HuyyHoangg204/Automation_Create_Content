@@ -1016,6 +1016,7 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt, onPro
 
     await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: 30000 });
     const host = (() => { try { return new URL(page.url()).hostname; } catch { return ''; } })();
+    
     if (host.includes('accounts.google.com')) {
       status = 'not_logged_in';
       return { status };
@@ -1024,15 +1025,67 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt, onPro
     // Wait for sidebar to load
     await new Promise((r) => setTimeout(r, 2000));
 
-    // Step 1: Click "Explore Gems" button in sidebar first
-    const clickedExplore = await clickSelectors(page, [
-      'button[aria-label="Explore Gems"]',
-      'button[aria-label*="Explore Gems" i]',
-      '[aria-label="Explore Gems"]',
-    ], { timeoutMs: 10000 });
+    // Step 1: Click bot list side nav entry button (new UI - replaces Explore Gems)
+    let clickedExplore = false;
     
+    try {
+      // Wait for the specific button to appear
+      const botListButton = await page.waitForSelector(
+        'side-nav-entry-button[data-test-id="bot-list-side-nav-entry-button"]',
+        { timeout: 12000, visible: true }
+      ).catch(() => null);
+      
+      if (botListButton) {
+        const dataTestId = await botListButton.evaluate((el) => el.getAttribute('data-test-id'));
+        
+        if (dataTestId === 'bot-list-side-nav-entry-button') {
+          const isVisible = await botListButton.isVisible();
+          const isEnabled = await botListButton.evaluate((el) => {
+            return !el.disabled && el.getAttribute('aria-disabled') !== 'true';
+          });
+          
+          if (isVisible && isEnabled) {
+            await botListButton.evaluate((el) => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+            await new Promise((r) => setTimeout(r, 500));
+            
+            try {
+              await botListButton.click({ timeout: 3000 });
+              clickedExplore = true;
+            } catch (clickErr) {
+              try {
+                await botListButton.evaluate((el) => el.click());
+                clickedExplore = true;
+              } catch (evalErr) {
+                await botListButton.evaluate((el) => {
+                  const event = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
+                  el.dispatchEvent(event);
+                });
+                clickedExplore = true;
+              }
+            }
+            
+            if (clickedExplore) {
+              await new Promise((r) => setTimeout(r, 1000));
+            }
+          }
+        }
+      }
+    } catch (e) {
+      // Ignore errors
+    }
+    
+    // Fallback: try old "Explore Gems" selectors
     if (!clickedExplore) {
-      const clickedByText = await clickByText(page, ['Explore Gems', 'Khám phá Gems'], { timeoutMs: 8000 });
+      clickedExplore = await clickSelectors(page, [
+        'button[aria-label="Explore Gems"]',
+        'button[aria-label*="Explore Gems" i]',
+        '[aria-label="Explore Gems"]',
+      ], { timeoutMs: 10000 });
+      
+      if (!clickedExplore) {
+        const clickedByText = await clickByText(page, ['Explore Gems', 'Khám phá Gems'], { timeoutMs: 8000 });
+        if (clickedByText) clickedExplore = true;
+      }
     }
     
     // Wait for Explore Gems page to load

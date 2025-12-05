@@ -705,12 +705,29 @@ async function updateTunnelUrlToBackend(machineId, tunnelUrl) {
 // Send heartbeat to backend
 async function sendHeartbeatToBackend(machineId, tunnelUrl, tunnelConnected, apiRunning, apiPort) {
   try {
+    // Lấy system info
+    let systemInfo = null
+    try {
+      const backendRequire = createRequire(import.meta.url)
+      const currentProjectRoot = app.isPackaged ? projectRoot : path.join(__dirname, '..')
+      const systemInfoService = backendRequire(path.join(currentProjectRoot, 'src', 'services', 'systemInfoService'))
+      systemInfo = await systemInfoService.getSystemInfo()
+    } catch (error) {
+      console.error('[Heartbeat] Failed to get system info:', error.message)
+      // Nếu không lấy được system info, vẫn gửi heartbeat nhưng không có system_info
+    }
+    
     const url = `${getBackendApiUrl()}/api/v1/machines/${machineId}/heartbeat`
     const requestBody = {
       tunnel_url: tunnelUrl || '',
       tunnel_connected: tunnelConnected,
       api_running: apiRunning,
       api_port: apiPort
+    }
+    
+    // Thêm system_info vào request body nếu có
+    if (systemInfo) {
+      requestBody.system_info = systemInfo
     }
     
     const apiKey = getBackendApiKey()
