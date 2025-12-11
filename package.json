@@ -1,12 +1,15 @@
 {
   "name": "automation_create_content",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Automation Content Creation App with Electron UI",
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
     "build": "vite build && electron-builder",
+    "build:release": "vite build && electron-builder && npm run upload:release",
+    "upload:release": "powershell -ExecutionPolicy Bypass -File scripts/upload-release.ps1",
+    "setup:github-token": "powershell -ExecutionPolicy Bypass -File scripts/setup-github-token.ps1",
     "preview": "vite preview",
     "start:backend": "node src/index.js",
     "start:dev": "nodemon src/index.js"

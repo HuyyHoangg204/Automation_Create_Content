@@ -1,5 +1,6 @@
 const { logger } = require('../logger');
-const { connectToBrowserByUserDataDir } = require('./gmailLogin');
+const { connectToBrowserByUserDataDir, ensureGmailLoggedIn } = require('./gmailLogin');
+const { getGoogleAccount } = require('../utils/googleAccount');
 
 async function clickByText(page, texts, options = {}) {
   const timeoutMs = options.timeoutMs || 10000;
@@ -738,12 +739,109 @@ async function createGem({ userDataDir, name, description, instructions, knowled
   }
 }
 
+/**
+ * Setup Gemini account for a Chrome profile
+ * This ensures Gmail is logged in (which also enables Gemini access)
+ * @param {Object} params
+ * @param {string} params.userDataDir - Chrome user data directory
+ * @param {string} [params.email] - Gmail email (optional, will use default if not provided)
+ * @param {string} [params.password] - Gmail password (optional, will use default if not provided)
+ * @param {number} [params.debugPort] - Chrome debug port
+ * @returns {Promise<{status: string, geminiAccessible: boolean, message?: string}>}
+ */
+async function setupGeminiAccount({ userDataDir, email, password, debugPort }) {
+  let status = 'unknown';
+  let geminiAccessible = false;
+  let message = '';
+  
+  try {
+    // Step 1: Get credentials if not provided
+    let credentials = null;
+    if (email && password) {
+      credentials = { email, password };
+    } else {
+      credentials = getGoogleAccount();
+      if (!credentials) {
+        status = 'no_credentials';
+        message = 'No Gmail credentials found. Please provide email and password or configure in Settings.';
+        return { status, geminiAccessible: false, message };
+      }
+    }
+
+    // Step 2: Ensure Gmail is logged in
+    logger.info({ userDataDir, email: credentials.email }, '[Gemini] Setting up Gemini account - ensuring Gmail login');
+    const gmailResult = await ensureGmailLoggedIn({
+      userDataDir,
+      email: credentials.email,
+      password: credentials.password,
+      debugPort
+    });
+
+    if (gmailResult.status === 'login_success' || gmailResult.status === 'already_logged_in') {
+      // Step 3: Check if Gemini is accessible
+      logger.info({ userDataDir }, '[Gemini] Gmail logged in, checking Gemini access');
+      const { browser } = await connectToBrowserByUserDataDir(userDataDir, debugPort);
+      let page = null;
+      
+      try {
+        page = await browser.newPage();
+        await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: 30000 });
+        
+        const host = (() => {
+          try {
+            return new URL(page.url()).hostname;
+          } catch {
+            return '';
+          }
+        })();
+
+        if (host.includes('accounts.google.com')) {
+          geminiAccessible = false;
+          status = 'gmail_logged_in_but_gemini_not_accessible';
+          message = 'Gmail is logged in but Gemini is not accessible. May need manual login to Gemini.';
+          logger.warn({ url: page.url() }, '[Gemini] Gmail logged in but Gemini redirected to login');
+        } else if (host.includes('gemini.google.com')) {
+          geminiAccessible = true;
+          status = 'success';
+          message = 'Gemini account is set up and accessible.';
+          logger.info({ url: page.url() }, '[Gemini] Gemini is accessible');
+        } else {
+          geminiAccessible = false;
+          status = 'unknown_redirect';
+          message = `Unexpected redirect to ${host}`;
+          logger.warn({ url: page.url() }, '[Gemini] Unexpected redirect');
+        }
+      } finally {
+        if (page) {
+          try {
+            await page.close({ runBeforeUnload: true });
+          } catch (_) {
+            // ignore
+          }
+        }
+      }
+    } else {
+      status = 'gmail_login_failed';
+      message = `Gmail login failed with status: ${gmailResult.status}`;
+      logger.error({ status: gmailResult.status }, '[Gemini] Gmail login failed');
+    }
+
+    return { status, geminiAccessible, message };
+  } catch (err) {
+    status = 'error';
+    message = err.message || 'Unknown error';
+    logger.error({ err, stack: err?.stack }, '[Gemini] Error setting up Gemini account');
+    return { status, geminiAccessible: false, message };
+  }
+}
+
 // Export helper functions for use in other scripts
 module.exports = { 
   createGem,
   clickByText,
   clickSelectors,
   uploadKnowledgeFiles,
+  setupGeminiAccount,
 };
 
 

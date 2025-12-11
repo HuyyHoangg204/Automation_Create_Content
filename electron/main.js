@@ -863,26 +863,6 @@ ipcMain.handle('google-account:get', async () => {
   }
 })
 
-ipcMain.handle('google-account:save', async (event, account) => {
-  try {
-    // Save to file (same location as prompts.json)
-    const filePath = path.join(os.homedir(), 'AppData', 'Local', 'Automation_Profiles', 'google-account.json')
-    const dir = path.dirname(filePath)
-    
-    // Create directory if it doesn't exist
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true })
-    }
-    
-    // Write file
-    fs.writeFileSync(filePath, JSON.stringify(account, null, 2), 'utf8')
-    return { success: true, path: filePath }
-  } catch (error) {
-    writeLog('error', 'Failed to save Google account', { error: error.message })
-    return { success: false, error: error.message }
-  }
-})
-
 // IPC Handlers for API status
 ipcMain.handle('api:status', async () => {
   try {

@@ -83,8 +83,36 @@ function getAllGoogleAccounts() {
   return accounts;
 }
 
+/**
+ * Save Google account to file
+ * @param {Object} account - { email: string, password: string }
+ * @returns {Promise<{success: boolean, path?: string, error?: string}>}
+ */
+async function saveGoogleAccount(account) {
+  try {
+    if (!account || !account.email || !account.password) {
+      return { success: false, error: 'Email and password are required' };
+    }
+
+    const filePath = path.join(os.homedir(), 'AppData', 'Local', 'Automation_Profiles', 'google-account.json');
+    const dir = path.dirname(filePath);
+    
+    // Create directory if it doesn't exist
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    
+    // Write file
+    fs.writeFileSync(filePath, JSON.stringify(account, null, 2), 'utf8');
+    return { success: true, path: filePath };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
+
 module.exports = {
   getGoogleAccount,
-  getAllGoogleAccounts
+  getAllGoogleAccounts,
+  saveGoogleAccount
 };
 

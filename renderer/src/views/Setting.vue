@@ -108,24 +108,6 @@
                 Password for Google account (default from .env file).
               </p>
             </div>
-
-            <!-- Save Button -->
-            <div class="flex justify-end pt-4 border-t border-gray-800">
-              <button
-                @click="saveGoogleAccount"
-                :disabled="isSaving"
-                class="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <svg v-if="!isSaving" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                </svg>
-                <svg v-else class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>
-                {{ isSaving ? 'Saving...' : 'Save Account' }}
-              </button>
-            </div>
           </div>
         </div>
       </div>
@@ -147,7 +129,6 @@ const isLoading = ref(false)
 // Google Account
 const googleEmail = ref('')
 const googlePassword = ref('')
-const isSaving = ref(false)
 
 onMounted(async () => {
   await loadSettings()
@@ -310,53 +291,6 @@ async function loadGoogleAccount() {
       detail: 'Using default account from .env. Error: ' + error.message,
       life: 3000
     })
-  }
-}
-
-// Save Google account to file
-async function saveGoogleAccount() {
-  try {
-    isSaving.value = true
-    
-    if (window.ipcRenderer) {
-      // Save to file via IPC
-      const result = await window.ipcRenderer.invoke('google-account:save', {
-        email: googleEmail.value,
-        password: googlePassword.value
-      })
-      
-      if (result.success) {
-        toast.add({
-          severity: 'success',
-          summary: 'Account Saved',
-          detail: `Google account saved to: ${result.path}`,
-          life: 3000
-        })
-      } else {
-        throw new Error(result.error || 'Failed to save account')
-      }
-    } else {
-      // Fallback to localStorage if IPC not available
-      localStorage.setItem('google_account_email', googleEmail.value)
-      localStorage.setItem('google_account_password', googlePassword.value)
-      
-      toast.add({
-        severity: 'success',
-        summary: 'Account Saved',
-        detail: 'Google account saved to local storage',
-        life: 3000
-      })
-    }
-  } catch (error) {
-    console.error('Error saving Google account:', error)
-    toast.add({
-      severity: 'error',
-      summary: 'Save Failed',
-      detail: error.message || 'Failed to save account',
-      life: 3000
-    })
-  } finally {
-    isSaving.value = false
   }
 }
 </script>
