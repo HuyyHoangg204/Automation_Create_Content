@@ -414,6 +414,75 @@ const openapi = {
         },
       },
     },
+    '/gemini/accounts/setup': {
+      post: {
+        summary: 'Save Google account to google-account.json file',
+        tags: ['gemini'],
+        description: 'This API only saves Google account credentials (email and password) to google-account.json file. It does NOT setup Gemini account for a Chrome profile. Server cloud can use this API to save account credentials.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  email: { type: 'string', format: 'email', description: 'Gmail email address (required)' },
+                  password: { type: 'string', description: 'Gmail password (required)' },
+                },
+                required: ['email', 'password'],
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: 'OK - Account saved successfully',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean', description: 'Whether the account was saved successfully' },
+                    message: { type: 'string', description: 'Success message' },
+                    path: { type: 'string', description: 'Path to the saved google-account.json file' },
+                  },
+                  required: ['success', 'message', 'path'],
+                },
+              },
+            },
+          },
+          400: { 
+            description: 'Bad Request - validation error',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    error: { type: 'string', enum: ['ValidationError'] },
+                    details: { type: 'array', items: { type: 'object' } },
+                  },
+                },
+              },
+            },
+          },
+          500: {
+            description: 'Internal Server Error - failed to save account',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean' },
+                    error: { type: 'string', description: 'Error message' },
+                  },
+                  required: ['success', 'error'],
+                },
+              },
+            },
+          },
+        },
+      },
+    },
     '/gemini/generate-outline-and-upload': {
       post: {
         summary: 'Generate outline using NotebookLM and upload to Gemini',

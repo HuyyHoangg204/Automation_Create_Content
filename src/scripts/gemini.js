@@ -431,88 +431,183 @@ async function createGem({ userDataDir, name, description, instructions, knowled
       return { status };
     }
 
-    // Debug: Check if bot list side nav entry button exists
-    logger.info({}, '[Gemini] Looking for bot list side nav entry button');
-    const botListButtonInfo = await page.evaluate(() => {
-      const selectors = [
-        'side-nav-entry-button[data-test-id="bot-list-side-nav-entry-button"]',
-        '[data-test-id="bot-list-side-nav-entry-button"]',
-        'side-nav-entry-button',
-      ];
-      const results = {};
-      for (const sel of selectors) {
-        const els = Array.from(document.querySelectorAll(sel));
-        results[sel] = els.map(el => ({
-          visible: el.offsetParent !== null,
-          text: (el.textContent || el.innerText || '').trim(),
-          dataTestId: el.getAttribute('data-test-id'),
-          disabled: el.disabled || el.getAttribute('aria-disabled') === 'true',
-          tagName: el.tagName,
-          className: el.className
-        }));
-      }
-      return results;
-    });
-    logger.info({ botListButtonInfo }, '[Gemini] Bot list side nav entry button search results');
-
     // Click bot list side nav entry button (new UI - replaces Explore Gems)
     // IMPORTANT: Only click element with exact data-test-id="bot-list-side-nav-entry-button"
-    logger.info({}, '[Gemini] Attempting to click bot list side nav entry button by selectors');
-    
-    // Use explicit selector with exact data-test-id match
     let clickedExploreBySelectors = false;
     try {
-      // Wait for the specific button to appear
+      // Wait for the specific button to appear (don't require visible, as it might be hidden in closed sidebar)
       const botListButton = await page.waitForSelector(
         'side-nav-entry-button[data-test-id="bot-list-side-nav-entry-button"]',
-        { timeout: 12000, visible: true }
+        { timeout: 12000 }
       ).catch(() => null);
       
       if (botListButton) {
+        // Get detailed info about the button
+        const buttonDetails = await botListButton.evaluate((el) => {
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          return {
+            dataTestId: el.getAttribute('data-test-id'),
+            text: (el.textContent || el.innerText || '').trim(),
+            disabled: el.disabled || el.getAttribute('aria-disabled') === 'true',
+            visible: el.offsetParent !== null,
+            boundingRect: {
+              x: rect.x,
+              y: rect.y,
+              width: rect.width,
+              height: rect.height,
+              top: rect.top,
+              left: rect.left,
+              bottom: rect.bottom,
+              right: rect.right
+            },
+            styles: {
+              display: style.display,
+              visibility: style.visibility,
+              opacity: style.opacity,
+              pointerEvents: style.pointerEvents,
+              zIndex: style.zIndex,
+              position: style.position
+            },
+            tagName: el.tagName,
+            className: el.className,
+            id: el.id
+          };
+        });
+        
         // Verify it has the correct data-test-id before clicking
-        const dataTestId = await botListButton.evaluate((el) => el.getAttribute('data-test-id'));
+        const dataTestId = buttonDetails.dataTestId;
+        
         if (dataTestId === 'bot-list-side-nav-entry-button') {
+          // Check if button is hidden (sidebar might be closed)
+          const isHidden = buttonDetails.styles.visibility === 'hidden' || 
+                          buttonDetails.styles.display === 'none' || 
+                          buttonDetails.styles.opacity === '0' ||
+                          !buttonDetails.visible;
+          
+          // If button is hidden, click hamburger menu to open sidebar
+          if (isHidden) {
+            try {
+              const menuButton = await page.$('button[data-test-id="side-nav-menu-button"]');
+              if (menuButton) {
+                await menuButton.click({ timeout: 3000 });
+                await new Promise((r) => setTimeout(r, 500));
+                
+                // Wait for button to become visible
+                await page.waitForFunction(
+                  (selector) => {
+                    const el = document.querySelector(selector);
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    return style.visibility !== 'hidden' && 
+                           style.display !== 'none' && 
+                           style.opacity !== '0' &&
+                           el.offsetParent !== null;
+                  },
+                  { timeout: 5000 },
+                  'side-nav-entry-button[data-test-id="bot-list-side-nav-entry-button"]'
+                ).catch(() => {});
+              }
+            } catch (_) {}
+          }
+          
           await botListButton.evaluate((el) => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
           await new Promise((r) => setTimeout(r, 300));
-          await botListButton.click({ timeout: 2000 });
-          clickedExploreBySelectors = true;
-          logger.info({ dataTestId }, '[Gemini] Successfully clicked bot-list-side-nav-entry-button');
-        } else {
-          logger.warn({ dataTestId }, '[Gemini] Found button but data-test-id does not match');
+          
+          try {
+            await botListButton.click({ timeout: 2000 });
+            clickedExploreBySelectors = true;
+          } catch (_) {}
         }
       }
-    } catch (e) {
-      logger.debug({ err: e }, '[Gemini] Error clicking bot-list-side-nav-entry-button');
-    }
+    } catch (_) {}
     
     // Fallback: try generic selector but verify data-test-id
     if (!clickedExploreBySelectors) {
       try {
         const allButtons = await page.$$('side-nav-entry-button');
-        for (const btn of allButtons) {
-          const dataTestId = await btn.evaluate((el) => el.getAttribute('data-test-id'));
+        
+        for (let i = 0; i < allButtons.length; i++) {
+          const btn = allButtons[i];
+          
+          const buttonInfo = await btn.evaluate((el) => {
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return {
+              dataTestId: el.getAttribute('data-test-id'),
+              text: (el.textContent || el.innerText || '').trim(),
+              disabled: el.disabled || el.getAttribute('aria-disabled') === 'true',
+              visible: el.offsetParent !== null,
+              boundingRect: {
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height
+              },
+              styles: {
+                display: style.display,
+                visibility: style.visibility,
+                opacity: style.opacity,
+                pointerEvents: style.pointerEvents
+              }
+            };
+          });
+          
+          const dataTestId = buttonInfo.dataTestId;
           if (dataTestId === 'bot-list-side-nav-entry-button') {
+            // Check if button is hidden
+            const isHidden = buttonInfo.styles.visibility === 'hidden' || 
+                            buttonInfo.styles.display === 'none' || 
+                            buttonInfo.styles.opacity === '0' ||
+                            !buttonInfo.visible;
+            
+            // If button is hidden, click hamburger menu to open sidebar
+            if (isHidden) {
+              try {
+                const menuButton = await page.$('button[data-test-id="side-nav-menu-button"]');
+                if (menuButton) {
+                  await menuButton.click({ timeout: 3000 });
+                  await new Promise((r) => setTimeout(r, 500));
+                  
+                  // Wait for button to become visible
+                  try {
+                    await page.waitForFunction(
+                      (selector) => {
+                        const el = document.querySelector(selector);
+                        if (!el) return false;
+                        const style = window.getComputedStyle(el);
+                        return style.visibility !== 'hidden' && 
+                               style.display !== 'none' && 
+                               style.opacity !== '0' &&
+                               el.offsetParent !== null;
+                      },
+                      { timeout: 5000 },
+                      'side-nav-entry-button[data-test-id="bot-list-side-nav-entry-button"]'
+                    );
+                  } catch (_) {}
+                }
+              } catch (_) {}
+            }
+            
             const isVisible = await btn.isVisible();
+            
             if (isVisible) {
               await btn.evaluate((el) => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
               await new Promise((r) => setTimeout(r, 300));
-              await btn.click({ timeout: 2000 });
-              clickedExploreBySelectors = true;
-              logger.info({}, '[Gemini] Successfully clicked bot-list-side-nav-entry-button via fallback');
-              break;
+              
+              try {
+                await btn.click({ timeout: 2000 });
+                clickedExploreBySelectors = true;
+                break;
+              } catch (_) {}
             }
           }
         }
-      } catch (e) {
-        logger.debug({ err: e }, '[Gemini] Error in fallback click');
-      }
+      } catch (_) {}
     }
-    
-    logger.info({ clickedExploreBySelectors }, '[Gemini] Click bot list side nav entry button by selectors result');
     
     let clickedExplore = clickedExploreBySelectors;
     if (!clickedExplore) {
-      logger.info({}, '[Gemini] Selectors failed, trying fallback selectors');
       // Fallback: try old Explore Gems selectors in case UI hasn't fully updated
       clickedExplore = await clickSelectors(page, [
         'button[aria-label="Explore Gems"]',
@@ -522,14 +617,11 @@ async function createGem({ userDataDir, name, description, instructions, knowled
       if (!clickedExplore) {
         clickedExplore = await clickByText(page, ['Explore Gems', 'Khám phá Gems'], { timeoutMs: 5000 });
       }
-      logger.info({ clickedExplore }, '[Gemini] Fallback click result');
     }
-    logger.info({ clickedExplore }, '[Gemini] Bot list button clicked, waiting for navigation');
     await Promise.race([
       page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {}),
       new Promise((r) => setTimeout(r, 1200)),
     ]);
-    logger.info({ url: page.url() }, '[Gemini] After bot list navigation');
 
     // Try click New Gem button inside Gem manager
     let clickedNew = false;

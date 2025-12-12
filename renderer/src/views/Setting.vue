@@ -61,6 +61,52 @@
           </div>
         </div>
         
+        <!-- Machine ID Settings -->
+        <div class="bg-[#0d1b2a] rounded-lg border border-gray-800 p-6 mb-6">
+          <h2 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+            </svg>
+            Machine ID
+          </h2>
+          
+          <div class="space-y-4">
+            <div>
+              <label class="block text-sm font-medium text-gray-400 mb-2">
+                Machine Identifier
+              </label>
+              <input
+                type="text"
+                v-model="machineId"
+                readonly
+                :disabled="isLoading"
+                class="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-sm text-gray-300 font-mono focus:outline-none focus:border-blue-500 disabled:opacity-50"
+                placeholder="Loading machine ID..."
+              />
+              <p class="text-xs text-gray-500 mt-2">
+                Unique identifier for this machine. Used for FRP tunnel and backend registration.
+              </p>
+            </div>
+            
+            <div class="flex items-center justify-between pt-4 border-t border-gray-800">
+              <div>
+                <p class="text-sm font-medium text-white">File Location</p>
+                <p class="text-xs text-gray-500 mt-1">{{ machineIdFile || 'Not loaded' }}</p>
+              </div>
+              <button
+                @click="copyMachineId"
+                :disabled="!machineId || isLoading"
+                class="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                </svg>
+                Copy ID
+              </button>
+            </div>
+          </div>
+        </div>
+        
         <!-- Google Account Settings -->
         <div class="bg-[#0d1b2a] rounded-lg border border-gray-800 p-6">
           <h2 class="text-lg font-semibold text-white mb-4 flex items-center gap-2">
@@ -149,8 +195,13 @@ const googleEmail = ref('')
 const googlePassword = ref('')
 const isSaving = ref(false)
 
+// Machine ID
+const machineId = ref('')
+const machineIdFile = ref('')
+
 onMounted(async () => {
   await loadSettings()
+  await loadMachineId()
 })
 
 async function loadSettings() {
@@ -313,50 +364,61 @@ async function loadGoogleAccount() {
   }
 }
 
-// Save Google account to file
-async function saveGoogleAccount() {
+// Load Machine ID
+async function loadMachineId() {
   try {
-    isSaving.value = true
-    
     if (window.ipcRenderer) {
-      // Save to file via IPC
-      const result = await window.ipcRenderer.invoke('google-account:save', {
-        email: googleEmail.value,
-        password: googlePassword.value
-      })
-      
-      if (result.success) {
-        toast.add({
-          severity: 'success',
-          summary: 'Account Saved',
-          detail: `Google account saved to: ${result.path}`,
-          life: 3000
-        })
-      } else {
-        throw new Error(result.error || 'Failed to save account')
-      }
+      const result = await window.ipcRenderer.invoke('machine-id:get')
+      machineId.value = result.machineId || ''
+      machineIdFile.value = result.filePath || ''
     } else {
-      // Fallback to localStorage if IPC not available
-      localStorage.setItem('google_account_email', googleEmail.value)
-      localStorage.setItem('google_account_password', googlePassword.value)
-      
-      toast.add({
-        severity: 'success',
-        summary: 'Account Saved',
-        detail: 'Google account saved to local storage',
-        life: 3000
-      })
+      machineId.value = 'Not available (IPC not available)'
     }
   } catch (error) {
-    console.error('Error saving Google account:', error)
+    console.error('Error loading machine ID:', error)
+    machineId.value = 'Error loading machine ID'
     toast.add({
-      severity: 'error',
-      summary: 'Save Failed',
-      detail: error.message || 'Failed to save account',
+      severity: 'warn',
+      summary: 'Load Failed',
+      detail: 'Failed to load machine ID: ' + error.message,
       life: 3000
     })
-  } finally {
-    isSaving.value = false
+  }
+}
+
+// Copy Machine ID to clipboard
+async function copyMachineId() {
+  try {
+    if (!machineId.value) return
+    
+    if (window.ipcRenderer) {
+      await window.ipcRenderer.invoke('clipboard:write', machineId.value)
+    } else if (navigator.clipboard) {
+      await navigator.clipboard.writeText(machineId.value)
+    } else {
+      // Fallback: select text
+      const input = document.createElement('input')
+      input.value = machineId.value
+      document.body.appendChild(input)
+      input.select()
+      document.execCommand('copy')
+      document.body.removeChild(input)
+    }
+    
+    toast.add({
+      severity: 'success',
+      summary: 'Copied',
+      detail: 'Machine ID copied to clipboard',
+      life: 2000
+    })
+  } catch (error) {
+    console.error('Error copying machine ID:', error)
+    toast.add({
+      severity: 'error',
+      summary: 'Copy Failed',
+      detail: error.message || 'Failed to copy machine ID',
+      life: 3000
+    })
   }
 }
 </script>
