@@ -289,19 +289,40 @@ async function getWindowsMachineGuid() {
 async function getOrCreateMachineId() {
   const machineIdFile = path.join(os.homedir(), '.automation-machine-id')
   
-  // Get real machine ID from system first (don't read file first)
-  let machineId = null
-  
-  // 1. Try Windows Machine GUID (UUID format) - most reliable
+  // 1. ALWAYS try Windows Machine GUID first (most reliable and unique)
+  let actualGuid = null
   if (process.platform === 'win32') {
-    const guid = await getWindowsMachineGuid()
-    if (guid) {
-      // Format: {machine-guid} (remove dashes for shorter subdomain, no prefix)
-      machineId = guid.replace(/-/g, '')
-    }
+    actualGuid = await getWindowsMachineGuid()
   }
   
-  // Check existing file - only use if it's Machine GUID format (32 hex chars)
+  // 2. If we have actual GUID, use it (ignore file to ensure uniqueness)
+  if (actualGuid) {
+    const machineId = actualGuid.replace(/-/g, '')
+    
+    // Validate file ID with actual GUID
+    try {
+      if (fs.existsSync(machineIdFile)) {
+        const existingId = fs.readFileSync(machineIdFile, 'utf8').trim()
+        const cleanExistingId = existingId.replace(/^xeon-/, '')
+        
+        // If file ID is different from actual GUID, regenerate (file might be copied from another machine)
+        if (cleanExistingId !== machineId) {
+          // Overwrite file with actual GUID
+          fs.writeFileSync(machineIdFile, machineId, 'utf8')
+        }
+      } else {
+        // Save actual GUID to file for future use
+        fs.writeFileSync(machineIdFile, machineId, 'utf8')
+      }
+    } catch (_) {
+      // Ignore if can't write, but still return GUID
+    }
+    
+    return machineId
+  }
+  
+  // 3. If Machine GUID not available, check existing file
+  let machineId = null
   try {
     if (fs.existsSync(machineIdFile)) {
       const existingId = fs.readFileSync(machineIdFile, 'utf8').trim()
@@ -312,22 +333,35 @@ async function getOrCreateMachineId() {
         // Existing ID is GUID format, use it (remove xeon- prefix if present)
         const cleanId = existingId.replace(/^xeon-/, '')
         return cleanId
+      } else {
+        // File exists but not GUID format - might be hostname (could be duplicate)
+        // Check if it looks like a hostname (contains non-hex chars or is short)
+        const looksLikeHostname = existingId.length < 32 || /[^a-f0-9]/i.test(existingId)
+        if (looksLikeHostname) {
+          // Will regenerate below with hostname + random suffix
+        } else {
+          // Use existing ID if it's not obviously a hostname
+          return existingId
+        }
       }
     }
   } catch (_) {
     // Ignore
   }
   
-  // 2. If Machine GUID not available, try hostname
+  // 4. If Machine GUID not available and no valid file, try hostname + random suffix (to avoid duplicates)
   if (!machineId) {
-    machineId = os.hostname()
-    if (machineId && machineId !== 'localhost' && machineId.trim() !== '') {
-      // Sanitize hostname: remove invalid chars, lowercase (no prefix)
-      machineId = machineId.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '')
+    const hostname = os.hostname()
+    if (hostname && hostname !== 'localhost' && hostname.trim() !== '') {
+      // Sanitize hostname: remove invalid chars, lowercase
+      const sanitizedHostname = hostname.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '')
+      // Add random suffix to ensure uniqueness even if hostname is duplicate
+      const randomSuffix = randomUUID().replace(/-/g, '').slice(0, 8)
+      machineId = `${sanitizedHostname}-${randomSuffix}`
     }
   }
   
-  // 3. If hostname not available, try MAC address
+  // 5. If hostname not available, try MAC address
   if (!machineId || machineId === 'localhost' || machineId.trim() === '') {
     try {
       const networkInterfaces = os.networkInterfaces()
@@ -347,7 +381,7 @@ async function getOrCreateMachineId() {
     }
   }
   
-  // 4. Fallback: use random UUID only if all above failed
+  // 6. Fallback: use random UUID only if all above failed
   if (!machineId || machineId === 'localhost' || machineId.trim() === '') {
     machineId = randomUUID().replace(/-/g, '')
   }
@@ -863,24 +897,29 @@ ipcMain.handle('google-account:get', async () => {
   }
 })
 
-ipcMain.handle('google-account:save', async (event, account) => {
+// IPC Handler for Machine ID
+ipcMain.handle('machine-id:get', async () => {
   try {
-    // Save to file (same location as prompts.json)
-    const filePath = path.join(os.homedir(), 'AppData', 'Local', 'Automation_Profiles', 'google-account.json')
-    const dir = path.dirname(filePath)
-    
-    // Create directory if it doesn't exist
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true })
+    const machineId = await getOrCreateMachineId()
+    const machineIdFile = path.join(os.homedir(), '.automation-machine-id')
+    return {
+      machineId,
+      filePath: machineIdFile
     }
-    
-    // Write file
-    fs.writeFileSync(filePath, JSON.stringify(account, null, 2), 'utf8')
-    return { success: true, path: filePath }
   } catch (error) {
-    writeLog('error', 'Failed to save Google account', { error: error.message })
-    return { success: false, error: error.message }
+    writeLog('error', 'Failed to get machine ID', { error: error.message })
+    return {
+      machineId: '',
+      filePath: ''
+    }
   }
+})
+
+// IPC Handler for clipboard
+ipcMain.handle('clipboard:write', async (event, text) => {
+  const { clipboard } = require('electron')
+  clipboard.writeText(text)
+  return { success: true }
 })
 
 // IPC Handlers for API status

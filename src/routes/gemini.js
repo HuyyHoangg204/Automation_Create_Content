@@ -6,6 +6,7 @@ const { logger } = require('../logger');
 const { resolveUserDataDir } = require('../utils/resolveUserDataDir');
 const { downloadFiles } = require('../utils/downloadFile');
 const { createGem } = require('../scripts/gemini');
+const { saveGoogleAccount } = require('../utils/googleAccount');
 const { listGems } = require('../scripts/listGems');
 const { sendPrompt } = require('../scripts/sendPrompt');
 const { launchNotebookLM } = require('../scripts/notebooklm');
@@ -655,6 +656,46 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
     }
     
     logger.error({ err }, '[Gemini] Error in generate-outline-and-upload');
+    return next(err);
+  }
+});
+
+/**
+ * POST /gemini/account/setup
+ * Save Google account to google-account.json file
+ * This API only saves account credentials to file, does not setup profile
+ */
+const setupAccountSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(1),
+});
+
+router.post('/accounts/setup', async (req, res, next) => {
+  try {
+    const parsed = setupAccountSchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'ValidationError', details: parsed.error.issues });
+    }
+
+    const { email, password } = parsed.data;
+
+    logger.info({ email }, '[Gemini] Saving Google account via setup API');
+    const result = await saveGoogleAccount({ email, password });
+
+    if (result.success) {
+      return res.json({
+        success: true,
+        message: 'Google account saved successfully',
+        path: result.path
+      });
+    } else {
+      return res.status(500).json({
+        success: false,
+        error: result.error || 'Failed to save Google account'
+      });
+    }
+  } catch (err) {
+    logger.error({ err, stack: err?.stack }, '[Gemini] Error in setup account API');
     return next(err);
   }
 });
