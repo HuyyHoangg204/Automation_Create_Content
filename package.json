@@ -1,12 +1,13 @@
 {
   "name": "automation_create_content",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Automation Content Creation App with Electron UI",
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
     "build": "vite build && electron-builder",
+    "build:release": "vite build && electron-builder --publish always",
     "preview": "vite preview",
     "start:backend": "node src/index.js",
     "start:dev": "nodemon src/index.js"
@@ -22,6 +23,7 @@
     "clipboardy": "^5.0.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
+    "electron-updater": "^6.1.7",
     "express": "^5.1.0",
     "fs-extra": "^11.3.2",
     "multer": "^2.0.2",
