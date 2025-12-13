@@ -1,6 +1,6 @@
 {
   "name": "automation_create_content",
-  "version": "1.0.10",  
+  "version": "1.0.11",  
   "description": "Automation Content Creation App with Electron UI",
   "type": "module",
   "main": "dist-electron/main.js",
