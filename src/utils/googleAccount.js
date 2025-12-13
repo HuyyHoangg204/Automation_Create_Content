@@ -83,8 +83,43 @@ function getAllGoogleAccounts() {
   return accounts;
 }
 
+/**
+ * Save Google account to file
+ * @param {Object} account { email, password }
+ * @returns {Promise<Object>} { success, path, error }
+ */
+async function saveGoogleAccount({ email, password }) {
+  try {
+    const dir = path.join(os.homedir(), 'AppData', 'Local', 'Automation_Profiles');
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    
+    const filePath = path.join(dir, 'google-account.json');
+    const accountData = {
+      email,
+      password,
+      updatedAt: new Date().toISOString()
+    };
+    
+    fs.writeFileSync(filePath, JSON.stringify(accountData, null, 2), 'utf8');
+    
+    return {
+      success: true,
+      path: filePath
+    };
+  } catch (error) {
+    console.error('[GoogleAccount] Failed to save account:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
 module.exports = {
   getGoogleAccount,
-  getAllGoogleAccounts
+  getAllGoogleAccounts,
+  saveGoogleAccount
 };
 
