@@ -248,10 +248,70 @@ router.post('/profiles/launch', validateBody(launchSchema), async (req, res, nex
       profileDirName: finalProfileDirName
     };
     
-    const result = await launchChromeProfile(launchParams);
+    console.log('[DEBUG] Launch Params:', JSON.stringify(launchParams, null, 2));
     
-    const debugPortArg = result.launchArgs?.find(a => a.includes('--remote-debugging-port'));
-    const debugPort = debugPortArg ? parseInt(debugPortArg.split('=')[1], 10) : undefined;
+    console.log('[DEBUG] Launch Params:', JSON.stringify(launchParams, null, 2));
+    
+    let result = await launchChromeProfile(launchParams);
+    
+    console.log('[DEBUG] Launch Result:', JSON.stringify(result, null, 2));
+
+    let debugPortArg = result.launchArgs?.find(a => a.includes('--remote-debugging-port'));
+    let debugPort = debugPortArg ? parseInt(debugPortArg.split('=')[1], 10) : undefined;
+
+    // Check for login failure if ensureGmail was requested
+    if (launchParams.ensureGmail) {
+      const status = result.gmailCheckStatus;
+      
+      // Strict check: Success only if 'logged_in', 'already_logged_in', or 'login_success'
+      const successStatuses = ['logged_in', 'already_logged_in', 'login_success'];
+      
+      if (!successStatuses.includes(status)) {
+        
+        await logService.logError(entityType, entityID, userID, 'chrome_launch_login', 
+          `Gmail login failed or incomplete. Status: ${status}`, {
+          profile: finalProfileDirName,
+          status: status
+        });
+
+        return res.status(401).json({
+          launched: true, // Browser launched but login failed
+          error: 'GmailLoginFailed',
+          message: `Gmail login validation failed. Status: ${status}`,
+          ...result
+        });
+      }
+
+      // RESTART LOGIC: If just logged in (login_success), restart the profile
+      // This is a specific user request: "tắt profile đi rồi bật lại" upon successful login.
+      if (status === 'login_success') {
+        console.log('[Chrome] Fresh login detected. Restarting profile as requested...');
+        
+        await logService.logInfo(entityType, entityID, userID, 'chrome_profile_restart', 
+          'Fresh login detected. Restarting profile to finalize session.', {
+          profile: finalProfileDirName
+        });
+
+        // 1. Stop profile
+        await stopChromeProfile({
+          userDataDir: resolvedUserDataDir,
+          profileDirName: finalProfileDirName
+        });
+
+        // 2. Wait for shutdown (2 seconds)
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        // 3. Relaunch (update result)
+        console.log('[Chrome] Relaunching profile...');
+        result = await launchChromeProfile(launchParams);
+        
+        // Update debug port for the new instance
+        debugPortArg = result.launchArgs?.find(a => a.includes('--remote-debugging-port'));
+        debugPort = debugPortArg ? parseInt(debugPortArg.split('=')[1], 10) : undefined;
+
+        console.log('[DEBUG] Relaunch Result:', JSON.stringify(result, null, 2));
+      }
+    }
     
     
     profileMonitorService.startMonitoring({
