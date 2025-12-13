@@ -50,7 +50,7 @@ if (require.main === module) {
   createApp().then((app) => {
     app.listen(port, () => {
       logger.info({ port }, 'Server started');
-      
+
       // Recover monitoring state sau khi server start
       const profileMonitorService = require('./services/profileMonitor');
       setTimeout(async () => {

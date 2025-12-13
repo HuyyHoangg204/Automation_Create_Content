@@ -1,4 +1,5 @@
 import { app, BrowserWindow, globalShortcut, ipcMain } from 'electron'
+import { autoUpdater } from 'electron-updater'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
@@ -950,6 +951,22 @@ ipcMain.handle('tunnel:status', async () => {
   }
 })
 
+// IPC Handlers for Auto-updater
+if (app.isPackaged) {
+  ipcMain.handle('updater:check', async () => {
+    try {
+      const result = await autoUpdater.checkForUpdates()
+      return { success: true, updateInfo: result?.updateInfo }
+    } catch (error) {
+      return { success: false, error: error.message }
+    }
+  })
+  
+  ipcMain.handle('updater:quit-and-install', () => {
+    autoUpdater.quitAndInstall(false, true)
+  })
+}
+
 // Track if app is quitting
 let isQuitting = false
 app.isQuitting = false
@@ -968,6 +985,66 @@ app.on('activate', () => {
     createWindow()
   }
 })
+
+// Auto-updater configuration
+if (app.isPackaged) {
+  // Auto-updater sẽ tự động đọc config từ electron-builder.json5
+  // Nếu cần override, có thể set như sau:
+  // autoUpdater.setFeedURL({
+  //   provider: 'github',
+  //   owner: process.env.GITHUB_OWNER || 'YOUR_GITHUB_USERNAME',
+  //   repo: process.env.GITHUB_REPO || 'YOUR_REPO_NAME'
+  // })
+  
+  autoUpdater.autoDownload = true
+  autoUpdater.autoInstallOnAppQuit = true
+  
+  autoUpdater.on('checking-for-update', () => {
+    writeLog('info', 'Checking for updates...')
+  })
+  
+  autoUpdater.on('update-available', (info) => {
+    writeLog('info', 'Update available', { version: info.version })
+    if (win) {
+      win.webContents.send('update-available', info)
+    }
+  })
+  
+  autoUpdater.on('update-not-available', (info) => {
+    writeLog('info', 'Update not available', { version: info.version })
+  })
+  
+  autoUpdater.on('error', (err) => {
+    writeLog('error', 'Error in auto-updater', { error: err.message })
+  })
+  
+  autoUpdater.on('download-progress', (progressObj) => {
+    const message = `Download speed: ${progressObj.bytesPerSecond} - Downloaded ${progressObj.percent}% (${progressObj.transferred}/${progressObj.total})`
+    writeLog('info', message)
+    if (win) {
+      win.webContents.send('download-progress', progressObj)
+    }
+  })
+  
+  autoUpdater.on('update-downloaded', (info) => {
+    writeLog('info', 'Update downloaded', { version: info.version })
+    if (win) {
+      win.webContents.send('update-downloaded', info)
+    }
+    // Tự động cài đặt khi app quit (hoặc có thể hỏi user trước)
+    // autoUpdater.quitAndInstall(false, true)
+  })
+  
+  // Check for updates khi app khởi động (sau 5 giây)
+  setTimeout(() => {
+    autoUpdater.checkForUpdatesAndNotify()
+  }, 5000)
+  
+  // Check for updates mỗi 4 giờ
+  setInterval(() => {
+    autoUpdater.checkForUpdatesAndNotify()
+  }, 4 * 60 * 60 * 1000)
+}
 
 app.whenReady().then(async () => {
   writeLog('info', 'App is ready, starting initialization...')

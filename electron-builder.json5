@@ -20,6 +20,12 @@
     ".env",
     "electron/tunnel/**/*"
   ],
+  "publish": {
+    "provider": "github",
+    "owner": "HuyyHoangg204",
+    "repo": "Automation_Create_Content",
+    "releaseType": "release"
+  },
   "mac": {
     "target": [
       "dmg"
@@ -35,13 +41,16 @@
         ]
       }
     ],
-    "artifactName": "${productName}-Windows-${version}-Setup.${ext}"
+    "artifactName": "${productName}-Windows-${version}-Setup.${ext}",
+    "publisherName": "Automation Create Content"
   },
   "nsis": {
     "oneClick": false,
     "perMachine": false,
     "allowToChangeInstallationDirectory": true,
-    "deleteAppDataOnUninstall": false
+    "deleteAppDataOnUninstall": false,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true
   },
   "linux": {
     "target": [
