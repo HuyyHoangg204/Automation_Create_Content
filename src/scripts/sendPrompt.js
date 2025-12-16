@@ -2,6 +2,7 @@ const { connectToBrowserByUserDataDir } = require('./gmailLogin');
 const { clickByText, clickSelectors, uploadKnowledgeFiles } = require('./gemini');
 const fs = require('fs');
 const path = require('path');
+const { logger } = require('../logger');
 
 async function typeIntoEditable(page, handle, text) {
   if (!handle) return false;
@@ -1024,15 +1025,61 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt, onPro
     // Wait for sidebar to load
     await new Promise((r) => setTimeout(r, 2000));
 
-    // Step 1: Click "Explore Gems" button in sidebar first
-    const clickedExplore = await clickSelectors(page, [
-      'button[aria-label="Explore Gems"]',
-      'button[aria-label*="Explore Gems" i]',
-      '[aria-label="Explore Gems"]',
-    ], { timeoutMs: 10000 });
+    // Step 1: Click "Explore Gems" or "Bot List" button in sidebar
+    logger.info({}, '[Gemini] Navigating to Bot List / Explore Gems');
+    
+     // Try new UI selector first: bot-list-side-nav-entry-button
+    let clickedExplore = false;
+    try {
+      const botListButton = await page.waitForSelector(
+        '[data-test-id="bot-list-side-nav-entry-button"]',
+        { timeout: 5000 }
+      ).catch(() => null);
+
+      if (botListButton) {
+        logger.info({}, '[Gemini] Found bot-list-side-nav-entry-button');
+         // Check visibility
+        const isHidden = await botListButton.evaluate((el) => {
+          const style = window.getComputedStyle(el);
+          return style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0' || el.offsetParent === null;
+        });
+
+        if (isHidden) {
+           logger.info({}, '[Gemini] Bot list button is hidden, trying to open sidebar');
+           const menuButton = await page.$('button[data-test-id="side-nav-menu-button"]');
+           if (menuButton) {
+             await menuButton.click();
+             await new Promise(r => setTimeout(r, 500));
+           }
+        }
+
+        await botListButton.evaluate(el => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+        await new Promise(r => setTimeout(r, 300));
+        await botListButton.click();
+        clickedExplore = true;
+        logger.info({}, '[Gemini] Clicked bot-list-side-nav-entry-button');
+      }
+    } catch (e) {
+      logger.warn({ error: e.message }, '[Gemini] Failed to click bot list button');
+    }
+
+    if (!clickedExplore) {
+      logger.info({}, '[Gemini] Falling back to old Explore Gems selectors');
+      clickedExplore = await clickSelectors(page, [
+        'button[aria-label="Explore Gems"]',
+        'button[aria-label*="Explore Gems" i]',
+        '[aria-label="Explore Gems"]',
+      ], { timeoutMs: 5000 });
+    }
     
     if (!clickedExplore) {
-      const clickedByText = await clickByText(page, ['Explore Gems', 'Khám phá Gems'], { timeoutMs: 8000 });
+      clickedExplore = await clickByText(page, ['Explore Gems', 'Khám phá Gems'], { timeoutMs: 5000 });
+    }
+    
+    if (clickedExplore) {
+       logger.info({}, '[Gemini] Successfully navigated to Explore Gems / Bot List');
+    } else {
+       logger.error({}, '[Gemini] Failed to navigate to Explore Gems / Bot List');
     }
     
     // Wait for Explore Gems page to load

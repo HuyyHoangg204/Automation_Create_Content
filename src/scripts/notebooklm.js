@@ -1,5 +1,6 @@
 const { logger } = require('../logger');
 const { connectToBrowserByUserDataDir } = require('./gmailLogin');
+const logService = require('../services/logService');
 const fs = require('fs');
 const path = require('path');
 
@@ -15,10 +16,13 @@ const path = require('path');
  * If outputFile is provided, intercepts GenerateFreeFormStreamed API response and saves it to file.
  * Returns 'notebook_created' if button was clicked, 'launched' otherwise.
  */
-async function launchNotebookLM({ userDataDir, debugPort, website, youtube, textContent, prompt, outputFile }) {
+async function launchNotebookLM({ userDataDir, debugPort, website, youtube, textContent, prompt, outputFile, entityType = 'topic', entityID = 'unknown', userID = 'unknown' }) {
   const { browser } = await connectToBrowserByUserDataDir(userDataDir, debugPort);
   let status = 'unknown';
   try {
+    await logService.logInfo(entityType, entityID, userID, 'notebooklm_step', 
+      'Đang kết nối đến Chrome và mở NotebookLM', {});
+    
     // Đóng các tab cũ để tránh quá nhiều tab (giữ lại 1 tab để browser không đóng)
     let page = null;
     try {
@@ -60,14 +64,24 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
     if (!page || page.isClosed()) {
       page = await browser.newPage();
     }
+    await logService.logInfo(entityType, entityID, userID, 'notebooklm_step', 
+      'Đang điều hướng đến trang NotebookLM', {});
+    
     const url = 'https://notebooklm.google.com/';
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     
     const host = (() => { try { return new URL(page.url()).hostname; } catch { return ''; } })();
     if (host.includes('accounts.google.com')) {
       status = 'not_logged_in';
+      await logService.logError(entityType, entityID, userID, 'notebooklm_step', 
+        'Chưa đăng nhập Google, không thể truy cập NotebookLM', {
+        redirect_url: page.url()
+      });
       return { status, url: page.url() };
     }
+    
+    await logService.logInfo(entityType, entityID, userID, 'notebooklm_step', 
+      'Đã vào trang NotebookLM, đang xử lý welcome popup nếu có', {});
 
     await new Promise((r) => setTimeout(r, 2000));
     try {
@@ -126,6 +140,8 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
 
     // Click "Create new notebook" button
     try {
+      await logService.logInfo(entityType, entityID, userID, 'notebooklm_step', 
+        'Đang tìm và click nút "Create new notebook"', {});
       
       // Wait a bit after popup dismissal
       await new Promise((r) => setTimeout(r, 1000));
@@ -306,11 +322,20 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
       }
 
       if (createClicked) {
+        await logService.logInfo(entityType, entityID, userID, 'notebooklm_step', 
+          'Đã click "Create new notebook" thành công', {});
+        
         await new Promise((r) => setTimeout(r, 2000));
         status = 'notebook_created';
         
         // Add sources if provided
         if (website || youtube || textContent) {
+          await logService.logInfo(entityType, entityID, userID, 'notebooklm_step', 
+            `Đang thêm sources: ${website?.length || 0} website(s), ${youtube?.length || 0} youtube(s), ${textContent ? 'text' : 'none'}`, {
+            website_count: website?.length || 0,
+            youtube_count: youtube?.length || 0,
+            has_text: !!textContent
+          });
           try {
             // Wait for "Add sources" modal to appear (it may already be open after Create new notebook)
             await page.waitForSelector('[role="dialog"], .modal, [class*="modal"], [class*="dialog"]', { 
@@ -347,260 +372,155 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
             };
             
             // Add website source
-            if (website && Array.isArray(website) && website.length > 0) {
+            // Combine all URLs (Website + YouTube)
+            const allUrls = [];
+            if (website && Array.isArray(website)) allUrls.push(...website);
+            if (youtube && Array.isArray(youtube)) allUrls.push(...youtube);
+
+            if (allUrls.length > 0) {
               try {
-                
-                // Priority 1: Try to find by ID
-                let websiteChip = await page.$('mat-chip#mat-mdc-chip-1');
-                
-                // Priority 2: Try to find mat-chip containing "Website" text
-                if (!websiteChip) {
-                  websiteChip = await page.evaluateHandle(() => {
-                    const chips = Array.from(document.querySelectorAll('mat-chip'));
-                    for (const chip of chips) {
-                      const text = (chip.textContent || '').trim();
-                      if (text === 'Website' || text.includes('Website')) {
-                        return chip;
-                      }
-                    }
-                    return null;
-                  });
-                  if (websiteChip && websiteChip.asElement()) {
-                    websiteChip = websiteChip.asElement();
-                  } else {
-                    websiteChip = null;
-                  }
-                }
-                
-                // Priority 3: Try to find by class containing chip
-                if (!websiteChip) {
-                  const chips = await page.$$('mat-chip, [class*="chip"]');
-                  for (const chip of chips) {
-                    const text = await chip.evaluate((el) => (el.textContent || '').trim());
-                    if (text === 'Website' || text.includes('Website')) {
-                      websiteChip = chip;
-                      break;
-                    }
-                  }
-                }
-                
-                if (websiteChip) {
-                  // Scroll into view and click
-                  await websiteChip.evaluate((el) => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
-                  await new Promise((r) => setTimeout(r, 300));
-                  await websiteChip.click({ timeout: 2000 });
-                  
-                  await new Promise((r) => setTimeout(r, 1500));
-                  
-                  // Find textarea/input with formcontrolname="newUrl"
-                  const urlTextarea = await page.$('textarea[formcontrolname="newUrl"], input[formcontrolname="newUrl"], textarea#mat-input-1, input#mat-input-1');
-                  if (urlTextarea) {
-                    await urlTextarea.click();
-                    // Join URLs with newline (one URL per line)
-                    const urlsText = website.join('\n');
-                    await urlTextarea.type(urlsText, { delay: 50 });
-                    await new Promise((r) => setTimeout(r, 500));
-                    
-                    // Click Insert button
-                    let insertClicked = false;
-                    
-                    // Priority 1: Find button in website-upload form using xpath
-                    try {
-                      const insertButtonXpath = await page.$x('//*[@id="mat-mdc-dialog-2"]/div/div/upload-dialog/div/div[2]/website-upload/form/button');
-                      if (insertButtonXpath && insertButtonXpath.length > 0) {
-                        await insertButtonXpath[0].click({ timeout: 2000 });
-                        insertClicked = true;
-                      }
-                    } catch (e) {
-                      logger.debug({ err: e }, 'notebooklm: xpath selector failed');
-                    }
-                    
-                    // Priority 2: Find button in website-upload form
-                    if (!insertClicked) {
-                      try {
-                        const websiteUploadForm = await page.$('website-upload form, upload-dialog website-upload form');
-                        if (websiteUploadForm) {
-                          const insertButton = await websiteUploadForm.$('button[type="submit"], button.submit-button, button');
-                          if (insertButton) {
-                            await insertButton.click({ timeout: 2000 });
-                            insertClicked = true;
-                          }
-                        }
-                      } catch (e) {
-                        logger.debug({ err: e }, 'notebooklm: form selector failed');
-                      }
-                    }
-                    
-                    // Priority 3: Find by class submit-button
-                    if (!insertClicked) {
-                      const insertButton = await page.$('button.submit-button, button[type="submit"].submit-button');
-                      if (insertButton) {
-                        await insertButton.click({ timeout: 2000 });
-                        insertClicked = true;
-                      }
-                    }
-                    
-                    // Priority 4: Find by text "Insert"
-                    if (!insertClicked) {
-                      const insertByText = await page.evaluate(() => {
-                        const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
-                        for (const btn of buttons) {
-                          const text = (btn.textContent || '').trim();
-                          if (text === 'Insert' || text.includes('Insert')) {
-                            btn.click();
-                            return true;
-                          }
-                        }
-                        return false;
-                      });
-                      if (insertByText) {
-                        insertClicked = true;
-                      }
-                    }
-                    
-                    if (insertClicked) {
-                      await new Promise((r) => setTimeout(r, 1000));
-                    } else {
-                      logger.warn({}, 'notebooklm: Insert button not found, URLs entered but not submitted');
-                    }
-                  } else {
-                    logger.warn({}, 'notebooklm: textarea #mat-input-1 not found');
-                  }
-                } else {
-                  logger.warn({}, 'notebooklm: Website chip not found');
-                }
-              } catch (e) {
-                // Ignore error adding website source
-              }
-            }
-            
-            // Add YouTube source (insert one by one)
-            if (youtube && Array.isArray(youtube) && youtube.length > 0) {
-              try {
-                
-                for (let i = 0; i < youtube.length; i += 1) {
-                  const youtubeUrl = youtube[i];
-                  try {
-                    
-                    // Click "Add source" button only if modal is not open
-                    const modalOpen = await isModalOpen();
-                    if (!modalOpen) {
-                      const addSourceButton = await page.$('button[aria-label="Add source"], [aria-label="Add source"]');
-                      if (addSourceButton) {
-                        await addSourceButton.click({ timeout: 2000 });
-                        await new Promise((r) => setTimeout(r, 1500));
-                        // Wait for modal to appear
+                // Ensure "Add source" modal is open if not already
+                const modalOpen = await isModalOpen();
+                if (!modalOpen) {
+                   // Support both English "Add source" and Vietnamese "Thêm nguồn"
+                   const addSourceButton = await page.$('button[aria-label="Add source"], [aria-label="Add source"], button[aria-label="Thêm nguồn"], [aria-label="Thêm nguồn"]');
+                   if (addSourceButton) {
+                     await addSourceButton.click({ timeout: 2000 });
+                     await new Promise((r) => setTimeout(r, 1500));
+                     try {
                         await page.waitForSelector('[role="dialog"], .modal, [class*="modal"], [class*="dialog"]', { 
                           timeout: 5000,
                           visible: true 
-                        }).catch(() => {
-                          logger.debug({}, 'notebooklm: modal not found after Add source click');
                         });
-                      }
-                    } else {
-                    }
-                    
-                    // Find YouTube chip by text "YouTube"
-                    let youtubeChip = null;
-                    const allChips = await page.$$('mat-chip');
-                    for (const chip of allChips) {
-                      const text = await chip.evaluate((el) => (el.textContent || '').trim());
-                      if (text === 'YouTube' || text.includes('YouTube')) {
-                        youtubeChip = chip;
-                        break;
-                      }
-                    }
-                    
-                    if (youtubeChip) {
-                      // Scroll into view and click
-                      await youtubeChip.evaluate((el) => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
-                      await new Promise((r) => setTimeout(r, 300));
-                      await youtubeChip.click({ timeout: 2000 });
-                      
-                      await new Promise((r) => setTimeout(r, 1500));
-                      
-                      // Find input with formcontrolname="newUrl"
-                      const urlInput = await page.$('input[formcontrolname="newUrl"], textarea[formcontrolname="newUrl"], input#mat-input-5, textarea#mat-input-5');
-                      if (urlInput) {
-                        await urlInput.click();
-                        await urlInput.type(youtubeUrl, { delay: 50 });
-                        await new Promise((r) => setTimeout(r, 500));
-                        
-                        // Click Insert button
-                        let insertClicked = false;
-                        
-                        // Priority 1: Find button in youtube-upload form using xpath
-                        try {
-                          const insertButtonXpath = await page.$x('//*[@id="mat-mdc-dialog-2"]/div/div/upload-dialog/div/div[2]/youtube-upload/form/button');
-                          if (insertButtonXpath && insertButtonXpath.length > 0) {
-                            await insertButtonXpath[0].click({ timeout: 2000 });
-                            insertClicked = true;
-                          }
-                        } catch (e) {
-                          logger.debug({ err: e }, 'notebooklm: xpath selector failed');
-                        }
-                        
-                        // Priority 2: Find button in youtube-upload form
-                        if (!insertClicked) {
-                          try {
-                            const youtubeUploadForm = await page.$('youtube-upload form, upload-dialog youtube-upload form');
-                            if (youtubeUploadForm) {
-                              const insertButton = await youtubeUploadForm.$('button[type="submit"], button.submit-button, button');
-                              if (insertButton) {
-                                await insertButton.click({ timeout: 2000 });
-                                insertClicked = true;
-                              }
-                            }
-                          } catch (e) {
-                            logger.debug({ err: e }, 'notebooklm: form selector failed');
-                          }
-                        }
-                        
-                        // Priority 3: Find by class submit-button
-                        if (!insertClicked) {
-                          const insertButton = await page.$('button.submit-button, button[type="submit"].submit-button');
-                          if (insertButton) {
-                            await insertButton.click({ timeout: 2000 });
-                            insertClicked = true;
-                          }
-                        }
-                        
-                        // Priority 4: Find by text "Insert"
-                        if (!insertClicked) {
-                          const insertByText = await page.evaluate(() => {
-                            const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
-                            for (const btn of buttons) {
-                              const text = (btn.textContent || '').trim();
-                              if (text === 'Insert' || text.includes('Insert')) {
-                                btn.click();
-                                return true;
-                              }
-                            }
-                            return false;
-                          });
-                          if (insertByText) {
-                            insertClicked = true;
-                          }
-                        }
-                        
-                        if (insertClicked) {
-                          await new Promise((r) => setTimeout(r, 1500));
-                        } else {
-                          logger.warn({ url: youtubeUrl }, 'notebooklm: Insert button not found, YouTube URL entered but not submitted');
-                        }
-                      } else {
-                        logger.warn({ url: youtubeUrl }, 'notebooklm: input not found for YouTube URL');
-                      }
-                    } else {
-                      logger.warn({ url: youtubeUrl }, 'notebooklm: YouTube chip not found');
-                    }
-                  } catch (urlError) {
-                    logger.warn({ err: urlError, url: youtubeUrl, index: i + 1 }, 'notebooklm: error processing YouTube URL, continuing to next');
-                  }
+                     } catch(err) { logger.debug({}, 'notebooklm: modal wait timeout'); }
+                   }
                 }
                 
+                // Find "Web/YouTube" button (Unified)
+                // Strategy: Target 2nd button in .drop-zone-actions as verified by user
+                try {
+                  await page.waitForSelector('.drop-zone-actions button', { visible: true, timeout: 8000 });
+                } catch (e) { 
+                  logger.debug({err: e}, 'notebooklm: Timed out waiting for .drop-zone-actions');
+                }
+
+                let sourceButton = null;
+                try {
+                   sourceButton = await page.evaluateHandle(() => {
+                      const dropZone = document.querySelector('.drop-zone-actions');
+                      if (dropZone) {
+                        const buttons = Array.from(dropZone.querySelectorAll('button'));
+                        if (buttons.length >= 2) {
+                          return buttons[1];
+                        }
+                      }
+                      
+                      // Fallback: search by class and text
+                      const buttons = Array.from(document.querySelectorAll('add-sources-dialog button, [role="dialog"] button'));
+                      for (const btn of buttons) {
+                         const text = (btn.textContent || '').trim().toLowerCase();
+                         const className = btn.className;
+                         if (className.includes('drop-zone-icon-button') && 
+                             (text.includes('trang web') || text.includes('website'))) {
+                            return btn;
+                         }
+                      }
+                      return null;
+                   });
+                   
+                   if (sourceButton && sourceButton.asElement()) {
+                     sourceButton = sourceButton.asElement();
+                     logger.info({}, 'notebooklm: Source button FOUND');
+                   } else {
+                     sourceButton = null;
+                     logger.warn({}, 'notebooklm: Source button NOT FOUND');
+                   }
+
+                } catch(e) { logger.error({err: e}, 'notebooklm: Error searching for source button'); }
+
+                if (sourceButton) {
+                   // Scroll and Click Source Button
+                   await sourceButton.evaluate((el) => el.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+                   await new Promise((r) => setTimeout(r, 1000));
+                   await sourceButton.click({ timeout: 5000 });
+                   await new Promise((r) => setTimeout(r, 1500));
+                   
+                   // Find input textarea
+                   // User specified: textarea with aria-label="Nhập URL" or formcontrolname="urls"
+                   const urlTextarea = await page.$('textarea[formcontrolname="urls"], textarea[aria-label="Nhập URL"], textarea[aria-label="Input URL"]');
+                   
+                   if (urlTextarea) {
+                     logger.info({}, 'notebooklm: URL textarea found');
+                     await urlTextarea.click();
+                     await new Promise((r) => setTimeout(r, 500));
+                     
+                     // Enter all URLs joined by newline
+                     const urlsText = allUrls.join('\n');
+                     await urlTextarea.type(urlsText, { delay: 10 });
+                     await new Promise((r) => setTimeout(r, 1000));
+                     
+                     // Click Insert/Submit button
+                     // Need robust finding for the "Insert" button in this new dialog
+                     let insertClicked = false;
+                     
+                     // Try finding the primary action button in the dialog
+                     const insertButton = await page.evaluateHandle(() => {
+                        const dialogs = document.querySelectorAll('website-upload, youtube-upload, [role="dialog"]');
+                        // Use the last open dialog usually
+                        const currentDialog = dialogs[dialogs.length - 1]; 
+                        if (!currentDialog) return null;
+                        
+                        const buttons = Array.from(currentDialog.querySelectorAll('button'));
+                        for (const btn of buttons) {
+                           const text = (btn.textContent || '').trim().toLowerCase();
+                           const type = btn.getAttribute('type');
+                           const ariaLabel = btn.getAttribute('aria-label') || '';
+                           
+                           // Common identifiers for submit buttons
+                           if (['insert', 'chèn', 'add', 'thêm', 'submit'].some(k => text.includes(k) || ariaLabel.toLowerCase().includes(k))) {
+                              return btn;
+                           }
+                           // If specific class 'submit-button' exists
+                           if (btn.classList.contains('submit-button')) return btn;
+                        }
+                        
+                        // Fallback: assume the last button is the submit button if it's not a "cancel" button
+                        if (buttons.length > 0) {
+                           const lastBtn = buttons[buttons.length - 1];
+                           const lastText = (lastBtn.textContent || '').trim().toLowerCase();
+                           if (!lastText.includes('hủy') && !lastText.includes('cancel') && !lastText.includes('close')) {
+                              return lastBtn;
+                           }
+                        }
+                        return null;
+                     });
+
+                     if (insertButton && insertButton.asElement()) {
+                        await insertButton.asElement().click();
+                        insertClicked = true;
+                        logger.info({}, 'notebooklm: Insert button clicked');
+                     } else {
+                        // Fallback to old selectors if evaluate failed
+                        const oldInsert = await page.$('button.submit-button, button[type="submit"]');
+                        if (oldInsert) {
+                           await oldInsert.click();
+                           insertClicked = true;
+                        }
+                     }
+                     
+                     if (!insertClicked) {
+                        logger.warn({}, 'notebooklm: Insert button not found after entering URLs');
+                     } else {
+                        // Wait for processing
+                        await new Promise((r) => setTimeout(r, 3000));
+                     }
+
+                   } else {
+                     logger.warn({}, 'notebooklm: URL textarea (formcontrolname="urls") not found');
+                   }
+                }
               } catch (e) {
-                logger.warn({ err: e }, 'notebooklm: error adding YouTube sources');
+                logger.error({err: e}, 'notebooklm: Error adding sources');
               }
             }
             // Add text content source
@@ -610,7 +530,8 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                 // Click "Add source" button only if modal is not open
                 const modalOpen = await isModalOpen();
                 if (!modalOpen) {
-                  const addSourceButton = await page.$('button[aria-label="Add source"], [aria-label="Add source"]');
+                  // Support both English "Add source" and Vietnamese "Thêm nguồn"
+                  const addSourceButton = await page.$('button[aria-label="Add source"], [aria-label="Add source"], button[aria-label="Thêm nguồn"], [aria-label="Thêm nguồn"]');
                   if (addSourceButton) {
                     await addSourceButton.click({ timeout: 2000 });
                     await new Promise((r) => setTimeout(r, 1500));
@@ -777,6 +698,8 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
           
           // Enter prompt after all sources are added
           if (prompt) {
+            await logService.logInfo(entityType, entityID, userID, 'notebooklm_step', 
+              'Đang nhập prompt vào query box', {});
             try {
               
               // Wait a bit for any modals to close
@@ -885,6 +808,9 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                 
                 // Click Submit button after entering prompt
                 try {
+                  await logService.logInfo(entityType, entityID, userID, 'notebooklm_step', 
+                    'Đã nhập prompt, đang click Submit để generate outline', {});
+                  
                   // Find button by type="submit" and aria-label="Submit"
                   let submitButton = await page.$('button[type="submit"][aria-label="Submit"]');
                   if (!submitButton) {
@@ -915,6 +841,8 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                 // Wait for response to finish generating, then scroll down and click copy button
                 if (outputFile && responseFinishedPromise) {
                   try {
+                    await logService.logInfo(entityType, entityID, userID, 'notebooklm_step', 
+                      'Đang chờ NotebookLM generate outline', {});
                     
                     // Wait for Network.loadingFinished event (indicates response is complete)
                     await Promise.race([
@@ -1155,6 +1083,11 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
                             }
                             
                             fs.writeFileSync(outputPath, pastedText, 'utf8');
+                            await logService.logSuccess(entityType, entityID, userID, 'notebooklm_step', 
+                              `Đã lưu outline vào file: ${path.basename(outputFile)}`, {
+                              file_path: outputFile,
+                              content_length: pastedText.length
+                            });
                           } else {
                             logger.warn({}, 'notebooklm: no text extracted from anotepad, file not saved');
                           }
@@ -1206,6 +1139,10 @@ async function launchNotebookLM({ userDataDir, debugPort, website, youtube, text
     return { status, url: page.url() };
   } catch (e) {
     if (logger && logger.error) logger.error({ err: e }, 'notebooklm: failed');
+    await logService.logError(entityType, entityID, userID, 'notebooklm_step', 
+      `Lỗi khi chạy NotebookLM: ${e?.message || String(e)}`, {
+      error: e?.message || String(e)
+    });
     return { status: 'failed', error: e?.message || String(e) };
   } finally {
     try { browser.disconnect(); } catch (_) {}

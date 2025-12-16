@@ -157,8 +157,22 @@ router.post('/profiles/launch', validateBody(launchSchema), async (req, res, nex
       profileDirName
     });
     
-    const profileDirNameFromIndex = await getProfileDirNameFromIndex(resolvedUserDataDir, name);
-    const finalProfileDirName = profileDirNameFromIndex || profileDirName || 'Default';
+    const fs = require('fs-extra');
+    const profileJsonPath = require('path').join(resolvedUserDataDir, 'profile.json');
+    let finalProfileDirName = 'Default';
+    
+    if (await fs.pathExists(profileJsonPath)) {
+      try {
+        const profileMeta = await fs.readJson(profileJsonPath);
+        if (profileMeta.profileDirName) {
+          finalProfileDirName = profileMeta.profileDirName;
+        }
+      } catch (_) {
+      }
+    } else {
+      const profileDirNameFromIndex = await getProfileDirNameFromIndex(resolvedUserDataDir, name);
+      finalProfileDirName = profileDirNameFromIndex || profileDirName || 'Default';
+    }
     
     const statusKey = finalProfileDirName;
     const monitorStatus = profileMonitorService.getStatus(resolvedUserDataDir, statusKey);
@@ -250,14 +264,14 @@ router.post('/profiles/launch', validateBody(launchSchema), async (req, res, nex
     
     console.log('[DEBUG] Launch Params:', JSON.stringify(launchParams, null, 2));
     
-    console.log('[DEBUG] Launch Params:', JSON.stringify(launchParams, null, 2));
-    
     let result = await launchChromeProfile(launchParams);
     
     console.log('[DEBUG] Launch Result:', JSON.stringify(result, null, 2));
 
     let debugPortArg = result.launchArgs?.find(a => a.includes('--remote-debugging-port'));
     let debugPort = debugPortArg ? parseInt(debugPortArg.split('=')[1], 10) : undefined;
+    
+    const originalProfileDirName = result.profileDirName || finalProfileDirName;
 
     // Check for login failure if ensureGmail was requested
     if (launchParams.ensureGmail) {
@@ -285,31 +299,93 @@ router.post('/profiles/launch', validateBody(launchSchema), async (req, res, nex
       // RESTART LOGIC: If just logged in (login_success), restart the profile
       // This is a specific user request: "tắt profile đi rồi bật lại" upon successful login.
       if (status === 'login_success') {
-        console.log('[Chrome] Fresh login detected. Restarting profile as requested...');
+        console.log('[Chrome] Fresh login detected. Waiting for session to be saved...');
         
         await logService.logInfo(entityType, entityID, userID, 'chrome_profile_restart', 
-          'Fresh login detected. Restarting profile to finalize session.', {
+          'Fresh login detected. Waiting for session to be saved before restarting.', {
           profile: finalProfileDirName
         });
 
+        // Wait for Chrome to save session/cookies to disk (important!)
+        // Chrome needs time to write cookies and session data to the profile folder
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        
+        console.log('[Chrome] Restarting profile as requested...');
+        
         // 1. Stop profile
+        await logService.logInfo(entityType, entityID, userID, 'chrome_profile_stopping', 
+          'Stopping Chrome profile before relaunch', {
+          profile: finalProfileDirName
+        });
+        
         await stopChromeProfile({
           userDataDir: resolvedUserDataDir,
-          profileDirName: finalProfileDirName
+          profileDirName: originalProfileDirName
         });
 
-        // 2. Wait for shutdown (2 seconds)
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        // 2. Wait for Chrome to fully shutdown - check process is actually killed
+        await logService.logInfo(entityType, entityID, userID, 'chrome_profile_waiting_shutdown', 
+          'Waiting for Chrome to fully shutdown', {
+          profile: finalProfileDirName
+        });
+        
+        const fs = require('fs-extra');
+        const { exec } = require('child_process');
+        const util = require('util');
+        const execPromise = util.promisify(exec);
+        
+        let attempts = 0;
+        const maxAttempts = 10;
+        const checkInterval = 500;
+        
+        while (attempts < maxAttempts) {
+          try {
+            const { stdout } = await execPromise(`powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'chrome.exe' -and $_.CommandLine -match '--user-data-dir=${resolvedUserDataDir.replace(/\\/g, '\\\\')}' } | Select-Object -ExpandProperty ProcessId"`);
+            const pids = stdout.trim().split('\n').filter(pid => pid.trim() && !isNaN(parseInt(pid.trim())));
+            if (pids.length === 0) {
+              break;
+            }
+          } catch (_) {
+            break;
+          }
+          attempts++;
+          await new Promise(resolve => setTimeout(resolve, checkInterval));
+        }
+        
+        if (attempts >= maxAttempts) {
+          console.log('[Chrome] Warning: Chrome processes may still be running, proceeding with relaunch anyway');
+          await logService.logWarning(entityType, entityID, userID, 'chrome_profile_shutdown_timeout', 
+            'Chrome processes may still be running, proceeding with relaunch', {
+            profile: finalProfileDirName
+          });
+        } else {
+          console.log(`[Chrome] Chrome processes stopped after ${attempts * checkInterval}ms`);
+          await logService.logInfo(entityType, entityID, userID, 'chrome_profile_shutdown_complete', 
+            `Chrome processes stopped after ${attempts * checkInterval}ms`, {
+            profile: finalProfileDirName
+          });
+        }
 
-        // 3. Relaunch (update result)
+        // 3. Relaunch với đúng params từ lần launch đầu
         console.log('[Chrome] Relaunching profile...');
-        result = await launchChromeProfile(launchParams);
+        const relaunchParams = {
+          ...launchParams,
+          profileDirName: originalProfileDirName
+        };
+        result = await launchChromeProfile(relaunchParams);
         
         // Update debug port for the new instance
         debugPortArg = result.launchArgs?.find(a => a.includes('--remote-debugging-port'));
         debugPort = debugPortArg ? parseInt(debugPortArg.split('=')[1], 10) : undefined;
 
         console.log('[DEBUG] Relaunch Result:', JSON.stringify(result, null, 2));
+        
+        await logService.logInfo(entityType, entityID, userID, 'chrome_profile_relaunched', 
+          'Chrome profile relaunched successfully after fresh login', {
+          profile: finalProfileDirName,
+          gmailStatus: result.gmailCheckStatus,
+          pid: result.pid
+        });
       }
     }
     
