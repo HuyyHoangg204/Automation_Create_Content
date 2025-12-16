@@ -52,8 +52,30 @@ router.post('/gems', async (req, res, next) => {
     });
 
     // Lấy entity context từ entityContextService (đã lưu khi launch Chrome)
-    // Ưu tiên: profileDirName -> userDataDir
-    const contextKey = profileDirName || userDataDir;
+    // QUAN TRỌNG: Key phải khớp với key đã lưu trong chrome.js
+    // chrome.js lưu với key = finalProfileDirName (từ profile.json hoặc getProfileDirNameFromIndex)
+    // Cần resolve finalProfileDirName giống như chrome.js
+    const fs = require('fs-extra');
+    const profileJsonPath = require('path').join(userDataDir, 'profile.json');
+    let finalProfileDirName = profileDirName || 'Default';
+    
+    if (await fs.pathExists(profileJsonPath)) {
+      try {
+        const profileMeta = await fs.readJson(profileJsonPath);
+        if (profileMeta.profileDirName) {
+          finalProfileDirName = profileMeta.profileDirName;
+        }
+      } catch (_) {
+      }
+    } else if (!profileDirName) {
+      // Nếu không có profile.json và không có profileDirName, dùng getProfileDirNameFromIndex
+      const { getProfileDirNameFromIndex } = require('../utils/resolveUserDataDir');
+      const profileDirNameFromIndex = await getProfileDirNameFromIndex(userDataDir, name);
+      finalProfileDirName = profileDirNameFromIndex || 'Default';
+    }
+    
+    // Dùng finalProfileDirName làm key (giống chrome.js)
+    const contextKey = finalProfileDirName;
     const savedContext = entityContextService.get(contextKey);
 
     // Extract entity info: ưu tiên context đã lưu, sau đó headers, cuối cùng body, fallback "unknown"
@@ -178,7 +200,10 @@ router.post('/gems', async (req, res, next) => {
       description,
       instructions,
       knowledgeFiles: finalKnowledgeFiles,
-      debugPort
+      debugPort,
+      entityType: finalEntityType,
+      entityID: finalEntityID,
+      userID: finalUserID
     });
 
     // Kiểm tra status từ createGem để xác định có thành công không
@@ -355,7 +380,31 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
       profileDirName
     });
 
-    const contextKey = profileDirName || userDataDir;
+    // Lấy entity context từ entityContextService (đã lưu khi launch Chrome)
+    // QUAN TRỌNG: Key phải khớp với key đã lưu trong chrome.js
+    // chrome.js lưu với key = finalProfileDirName (từ profile.json hoặc getProfileDirNameFromIndex)
+    // Cần resolve finalProfileDirName giống như chrome.js
+    const fs = require('fs-extra');
+    const profileJsonPath = require('path').join(userDataDir, 'profile.json');
+    let finalProfileDirName = profileDirName || 'Default';
+    
+    if (await fs.pathExists(profileJsonPath)) {
+      try {
+        const profileMeta = await fs.readJson(profileJsonPath);
+        if (profileMeta.profileDirName) {
+          finalProfileDirName = profileMeta.profileDirName;
+        }
+      } catch (_) {
+      }
+    } else if (!profileDirName) {
+      // Nếu không có profile.json và không có profileDirName, dùng getProfileDirNameFromIndex
+      const { getProfileDirNameFromIndex } = require('../utils/resolveUserDataDir');
+      const profileDirNameFromIndex = await getProfileDirNameFromIndex(userDataDir, name);
+      finalProfileDirName = profileDirNameFromIndex || 'Default';
+    }
+    
+    // Dùng finalProfileDirName làm key (giống chrome.js)
+    const contextKey = finalProfileDirName;
     const savedContext = entityContextService.get(contextKey);
 
     let finalEntityType = 'topic';
@@ -371,8 +420,6 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
       finalEntityID = req.headers['x-entity-id'] || req.body.entity_id || 'unknown';
       finalUserID = req.headers['x-user-id'] || req.body.user_id || 'unknown';
     }
-
-    const finalProfileDirName = profileDirName || 'Default';
 
     await logService.logInfo(finalEntityType, finalEntityID, finalUserID, 'outline_generation_started',
       'Bắt đầu tạo dàn ý bằng NotebookLM', {
@@ -414,7 +461,10 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
       youtube,
       textContent,
       prompt: notebooklmPrompt,
-      outputFile: outlineFilePath
+      outputFile: outlineFilePath,
+      entityType: finalEntityType,
+      entityID: finalEntityID,
+      userID: finalUserID
     });
 
     if (notebooklmResult.status === 'not_logged_in') {

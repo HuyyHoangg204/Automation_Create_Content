@@ -1,5 +1,6 @@
 const { logger } = require('../logger');
 const { connectToBrowserByUserDataDir } = require('./gmailLogin');
+const logService = require('../services/logService');
 
 async function clickByText(page, texts, options = {}) {
   const timeoutMs = options.timeoutMs || 10000;
@@ -393,11 +394,16 @@ async function uploadKnowledgeFiles(page, files) {
   }
 }
 
-async function createGem({ userDataDir, name, description, instructions, knowledgeFiles, debugPort }) {
+async function createGem({ userDataDir, name, description, instructions, knowledgeFiles, debugPort, entityType = 'topic', entityID = 'unknown', userID = 'unknown' }) {
   const { browser } = await connectToBrowserByUserDataDir(userDataDir, debugPort);
   let status = 'unknown';
   let page = null;
   try {
+    await logService.logInfo(entityType, entityID, userID, 'gem_creating_step', 
+      'Đang kết nối đến Chrome và mở trang Gemini', {
+      gem_name: name || 'unknown'
+    });
+    
     page = await browser.newPage();
 
     // Step 1: Patch HTMLInputElement.prototype.click to prevent OS dialog
@@ -421,6 +427,11 @@ async function createGem({ userDataDir, name, description, instructions, knowled
       window.__puppeteer_patched_input_click = originalClick;
     });
 
+    await logService.logInfo(entityType, entityID, userID, 'gem_creating_step', 
+      'Đang điều hướng đến trang Gemini', {
+      gem_name: name || 'unknown'
+    });
+    
     await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: 30000 });
     const host = (() => { try { return new URL(page.url()).hostname; } catch { return ''; } })();
     logger.info({ url: page.url(), host }, '[Gemini] Navigated to Gemini app');
@@ -428,8 +439,18 @@ async function createGem({ userDataDir, name, description, instructions, knowled
     if (host.includes('accounts.google.com')) {
       status = 'not_logged_in';
       logger.warn({ url: page.url() }, '[Gemini] Not logged in, redirected to accounts.google.com');
+      await logService.logError(entityType, entityID, userID, 'gem_creating_step', 
+        'Chưa đăng nhập Gmail, không thể tạo Gem', {
+        gem_name: name || 'unknown',
+        redirect_url: page.url()
+      });
       return { status };
     }
+    
+    await logService.logInfo(entityType, entityID, userID, 'gem_creating_step', 
+      'Đã vào trang Gemini, đang tìm nút tạo Gem mới', {
+      gem_name: name || 'unknown'
+    });
 
     // Click bot list side nav entry button (new UI - replaces Explore Gems)
     // IMPORTANT: Only click element with exact data-test-id="bot-list-side-nav-entry-button"
@@ -626,6 +647,10 @@ async function createGem({ userDataDir, name, description, instructions, knowled
     // Try click New Gem button inside Gem manager
     let clickedNew = false;
     if (clickedExplore) {
+      await logService.logInfo(entityType, entityID, userID, 'gem_creating_step', 
+        'Đã mở Gem manager, đang tìm nút New Gem', {
+        gem_name: name || 'unknown'
+      });
       logger.info({}, '[Gemini] Looking for New Gem button');
       // Debug: Check if New Gem button exists
       const newGemInfo = await page.evaluate(() => {
@@ -678,6 +703,11 @@ async function createGem({ userDataDir, name, description, instructions, knowled
         logger.info({ clickedNew }, '[Gemini] Click New Gem by text result');
       }
       if (clickedNew) {
+        await logService.logInfo(entityType, entityID, userID, 'gem_creating_step', 
+          'Đã click New Gem, đang mở form tạo Gem', {
+          gem_name: name || 'unknown'
+        });
+        
         await Promise.race([
           page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {}),
           new Promise((r) => setTimeout(r, 800)),
@@ -687,6 +717,10 @@ async function createGem({ userDataDir, name, description, instructions, knowled
 
         // Fill fields if provided
         if (name) {
+          await logService.logInfo(entityType, entityID, userID, 'gem_creating_step', 
+            'Đang điền tên Gem', {
+            gem_name: name
+          });
           // Prefer stable id if present
           let nameField = await page.$('#gem-name-input');
           if (!nameField) nameField = await findFieldByPlaceholders(page, ['Give your Gem a name', 'Name']);
@@ -694,11 +728,19 @@ async function createGem({ userDataDir, name, description, instructions, knowled
           if (nameField) await typeInto(page, nameField, name);
         }
         if (description) {
+          await logService.logInfo(entityType, entityID, userID, 'gem_creating_step', 
+            'Đang điền mô tả Gem', {
+            gem_name: name || 'unknown'
+          });
           let descField = await findFieldByPlaceholders(page, ['Describe your Gem', 'Description']);
           if (!descField) descField = await findFieldByLabel(page, ['Description']);
           if (descField) await typeInto(page, descField, description);
         }
         if (instructions) {
+          await logService.logInfo(entityType, entityID, userID, 'gem_creating_step', 
+            'Đang điền hướng dẫn cho Gem', {
+            gem_name: name || 'unknown'
+          });
           // Prefer explicit instruction rich editor container
           let instField = await page.$('[data-test-id="instruction-rich-input-field"], div[role="textbox"][data-test-id*="instruction"]');
           if (!instField) instField = await findFieldByPlaceholders(page, ['Instructions']);
@@ -715,6 +757,11 @@ async function createGem({ userDataDir, name, description, instructions, knowled
         }
         let saveClicked = false;
         if (knowledgeFiles && knowledgeFiles.length) {
+          await logService.logInfo(entityType, entityID, userID, 'gem_creating_step', 
+            `Đang upload ${knowledgeFiles.length} file(s) vào Gem`, {
+            gem_name: name || 'unknown',
+            files_count: knowledgeFiles.length
+          });
           const ok = await uploadKnowledgeFiles(page, knowledgeFiles);
 					if (ok) {
 						// Wait until Save button becomes enabled/visible, then click it (no fixed timeout)
@@ -749,11 +796,21 @@ async function createGem({ userDataDir, name, description, instructions, knowled
 						} catch (_) {
 							// If it didn't become enabled in time, still try clicking optimistically
 						}
+						await logService.logInfo(entityType, entityID, userID, 'gem_creating_step', 
+						  'Đang chờ nút Save sẵn sàng và click Save', {
+						  gem_name: name || 'unknown'
+						});
+						
 						saveClicked = await clickSelectors(page, candidates, { timeoutMs: 5000 })
 							|| await clickByText(page, ['Save', 'Lưu'], { timeoutMs: 5000 });
 						
 						// Đợi một chút sau khi click Save để xem có navigation hoặc thay đổi không
 						if (saveClicked) {
+							await logService.logInfo(entityType, entityID, userID, 'gem_creating_step', 
+							  'Đã click Save, đang chờ Gem được lưu', {
+							  gem_name: name || 'unknown'
+							});
+							
 							await Promise.race([
 								page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {}),
 								new Promise((r) => setTimeout(r, 2000))
@@ -803,16 +860,40 @@ async function createGem({ userDataDir, name, description, instructions, knowled
         // Xác định status dựa trên kết quả
         if (clickedNew && saveClicked) {
           status = 'gem_created';
+          await logService.logSuccess(entityType, entityID, userID, 'gem_creating_step', 
+            'Gem đã được tạo và lưu thành công', {
+            gem_name: name || 'unknown'
+          });
         } else if (clickedNew && !saveClicked) {
           status = 'gem_form_filled_but_not_saved';
+          await logService.logWarning(entityType, entityID, userID, 'gem_creating_step', 
+            'Form đã được điền nhưng không thể click Save', {
+            gem_name: name || 'unknown'
+          });
         } else {
           status = clickedNew ? 'new_gem_clicked' : (clickedExplore ? 'opened_explore' : 'noop');
+          await logService.logWarning(entityType, entityID, userID, 'gem_creating_step', 
+            `Không thể hoàn tất tạo Gem: ${status}`, {
+            gem_name: name || 'unknown',
+            status
+          });
         }
+      } else {
+        await logService.logWarning(entityType, entityID, userID, 'gem_creating_step', 
+          'Không thể mở form tạo Gem mới', {
+          gem_name: name || 'unknown',
+          clickedExplore
+        });
       }
     }
 
     return { status };
   } catch (e) {
+    await logService.logError(entityType, entityID, userID, 'gem_creating_step', 
+      `Lỗi khi tạo Gem: ${e?.message || String(e)}`, {
+      gem_name: name || 'unknown',
+      error: e?.message || String(e)
+    });
     return { status: 'failed', error: e?.message || String(e) };
   } finally {
     try {
