@@ -8,12 +8,13 @@ const { downloadFiles } = require('../utils/downloadFile');
 const { createGem } = require('../scripts/gemini');
 const { saveGoogleAccount } = require('../utils/googleAccount');
 const { listGems } = require('../scripts/listGems');
-const { sendPrompt } = require('../scripts/sendPrompt');
+const { sendPrompt, sendNextPrompt } = require('../scripts/sendPrompt');
 const { launchNotebookLM } = require('../scripts/notebooklm');
 const logService = require('../services/logService');
 const entityContextService = require('../services/entityContext');
 const profileMonitorService = require('../services/profileMonitor');
 const profileStatusEvent = require('../services/profileStatusEvent');
+const { stopChromeProfile, launchChromeProfile } = require('../services/chrome');
 
 const router = express.Router();
 
@@ -556,6 +557,9 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
       gem,
       listFile: [outlineFilePath],
       prompt: sendPromptText || 'Đây là dàn ý đã được tạo, hãy phân tích và tạo nội dung chi tiết dựa trên dàn ý này.',
+      entityType: finalEntityType,
+      entityID: finalEntityID,
+      userID: finalUserID,
       onProgress: async (stage, message, metadata) => {
         if (stage === 'text_copied' && metadata && metadata.text) {
           await logService.logInfo(finalEntityType, finalEntityID, finalUserID, 'text_copied',
@@ -746,6 +750,495 @@ router.post('/accounts/setup', async (req, res, next) => {
     }
   } catch (err) {
     logger.error({ err, stack: err?.stack }, '[Gemini] Error in setup account API');
+    return next(err);
+  }
+});
+
+const projectSchema = z.object({
+  name: z.string().min(1).optional(),
+  userDataDir: z.string().min(1).optional(),
+  profileDirName: z.string().min(1).optional().default('Default'),
+  debugPort: z.number().optional(),
+  project: z.string().min(1),
+  gemName: z.string().min(1),
+  prompts: z.array(z.object({
+    prompt: z.string().min(1),
+    output: z.string().optional(),
+    exit: z.boolean().optional().default(false),
+    prompt_id: z.string().optional()
+  })).min(1),
+  entityType: z.string().optional().default('topic'),
+  entityID: z.string().optional().default('unknown'),
+  userID: z.string().optional().default('unknown'),
+  execution_id: z.string().optional()
+}).refine((d) => !!d.name || !!d.userDataDir, {
+  message: 'Either name or userDataDir must be provided',
+  path: ['name'],
+});
+
+router.post('/projects', async (req, res, next) => {
+  try {
+    const parsed = projectSchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'ValidationError', details: parsed.error.issues });
+    }
+
+    const {
+      name,
+      userDataDir: inputUserDataDir,
+      profileDirName,
+      debugPort: inputDebugPort,
+      project,
+      gemName,
+      prompts,
+      entityType = 'topic',
+      entityID = 'unknown',
+      userID = 'unknown',
+      execution_id
+    } = parsed.data;
+
+    const userDataDir = await resolveUserDataDir({
+      userDataDir: inputUserDataDir,
+      name,
+      profileDirName
+    });
+
+    // Lấy entity context từ entityContextService (đã lưu khi launch Chrome)
+    // QUAN TRỌNG: Key phải khớp với key đã lưu trong chrome.js
+    // chrome.js lưu với key = finalProfileDirName (từ profile.json hoặc getProfileDirNameFromIndex)
+    // Cần resolve finalProfileDirName giống như chrome.js
+    const profileJsonPath = path.join(userDataDir, 'profile.json');
+    let finalProfileDirName = profileDirName || 'Default';
+    
+    if (await fs.pathExists(profileJsonPath)) {
+      try {
+        const profileMeta = await fs.readJson(profileJsonPath);
+        if (profileMeta.profileDirName) {
+          finalProfileDirName = profileMeta.profileDirName;
+        }
+      } catch (_) {}
+    } else if (!profileDirName) {
+      const { getProfileDirNameFromIndex } = require('../utils/resolveUserDataDir');
+      const profileDirNameFromIndex = await getProfileDirNameFromIndex(userDataDir, name);
+      finalProfileDirName = profileDirNameFromIndex || 'Default';
+    }
+    
+    // Dùng finalProfileDirName làm key (giống chrome.js)
+    const contextKey = finalProfileDirName;
+    const savedContext = entityContextService.get(contextKey);
+
+    let finalEntityTypeFromContext = 'topic';
+    let finalEntityIDFromContext = 'unknown';
+    let finalUserIDFromContext = 'unknown';
+
+    if (savedContext) {
+      finalEntityTypeFromContext = savedContext.entityType || 'topic';
+      finalEntityIDFromContext = savedContext.entityID || 'unknown';
+      finalUserIDFromContext = savedContext.userID || 'unknown';
+    } else {
+      finalEntityTypeFromContext = req.headers['x-entity-type'] || req.body.entity_type || entityType || 'topic';
+      finalEntityIDFromContext = req.headers['x-entity-id'] || req.body.entity_id || entityID || 'unknown';
+      finalUserIDFromContext = req.headers['x-user-id'] || req.body.user_id || userID || 'unknown';
+    }
+
+    // Resolve debugPort: ưu tiên từ request > profileMonitor > file
+    let currentDebugPort;
+    
+    if (inputDebugPort) {
+      // Ưu tiên debugPort từ request (cho phép nhiều Chrome instances song song)
+      currentDebugPort = inputDebugPort;
+    } else {
+      // Fallback: lấy từ profileMonitor hoặc file
+      const statusKey = finalProfileDirName;
+      const allMonitored = profileMonitorService.getAllMonitoredProfiles();
+      const existingProfile = allMonitored.find(p => 
+        p.userDataDir === userDataDir && p.profileDirName === finalProfileDirName && p.status === 'running'
+      );
+      
+      if (existingProfile && existingProfile.port) {
+        currentDebugPort = existingProfile.port;
+      } else {
+        const { readDebugPort } = require('../services/chrome');
+        currentDebugPort = await readDebugPort(userDataDir);
+      }
+    }
+
+    await logService.logInfo(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'project_starting',
+      `Bắt đầu project: ${project}`, {
+        project,
+        gem_name: gemName,
+        prompts_count: prompts.length,
+        execution_id: execution_id || null
+      });
+
+    // Set automationStatus = 'running' để tránh idle timeout khi đang xử lý
+    profileMonitorService.setAutomationStatus(userDataDir, finalProfileDirName, 'running');
+
+    const results = [];
+    let needsGemClick = true;
+
+    try {
+      for (let i = 0; i < prompts.length; i++) {
+        const promptItem = prompts[i];
+        const { prompt, output: outputPath, exit, prompt_id } = promptItem;
+
+        logger.info({ 
+          project, 
+          gem_name: gemName, 
+          prompt_index: i, 
+          total_prompts: prompts.length,
+          prompt_id: prompt_id || `prompt_${i + 1}`,
+          needsGemClick 
+        }, `[DEBUG] Bắt đầu vòng lặp prompt ${i + 1}/${prompts.length}`);
+
+        await logService.logInfo(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'prompt_processing',
+          `Đang xử lý prompt ${i + 1}/${prompts.length}`, {
+            project,
+            gem_name: gemName,
+            prompt_id: prompt_id || `prompt_${i + 1}`,
+            prompt_preview: prompt.substring(0, 100)
+          });
+
+        try {
+          let promptResult;
+          
+          if (needsGemClick) {
+            logger.info({ 
+              project, 
+              gem_name: gemName, 
+              prompt_id: prompt_id || `prompt_${i + 1}` 
+            }, `[DEBUG] Gọi sendPrompt cho prompt ${i + 1}`);
+            promptResult = await sendPrompt({
+              userDataDir,
+              debugPort: currentDebugPort,
+              gem: gemName,
+              prompt,
+              entityType: finalEntityTypeFromContext,
+              entityID: finalEntityIDFromContext,
+              userID: finalUserIDFromContext,
+              onProgress: async (stage, message, metadata) => {
+                if (stage === 'text_copied' && metadata && metadata.text) {
+                  await logService.logInfo(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'prompt_response_received',
+                    `Đã nhận response từ Gemini cho prompt ${prompt_id || `prompt_${i + 1}`}`, {
+                      project,
+                      gem_name: gemName,
+                      prompt_id: prompt_id || `prompt_${i + 1}`,
+                      text_length: metadata.text_length || 0,
+                      text: metadata.text,
+                      execution_id: execution_id || null
+                    });
+                }
+              }
+            });
+            needsGemClick = false;
+            logger.info({ 
+              project, 
+              gem_name: gemName, 
+              prompt_id: prompt_id || `prompt_${i + 1}`,
+              status: promptResult?.status,
+              hasText: !!promptResult?.copiedText
+            }, `[DEBUG] Đã hoàn thành sendPrompt cho prompt ${i + 1}`);
+          } else {
+            logger.info({ 
+              project, 
+              gem_name: gemName, 
+              prompt_id: prompt_id || `prompt_${i + 1}` 
+            }, `[DEBUG] Gọi sendNextPrompt cho prompt ${i + 1}`);
+            promptResult = await sendNextPrompt({
+              userDataDir,
+              debugPort: currentDebugPort,
+              prompt,
+              entityType: finalEntityTypeFromContext,
+              entityID: finalEntityIDFromContext,
+              userID: finalUserIDFromContext,
+              onProgress: async (stage, message, metadata) => {
+                if (stage === 'text_copied' && metadata && metadata.text) {
+                  await logService.logInfo(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'prompt_response_received',
+                    `Đã nhận response từ Gemini cho prompt ${prompt_id || `prompt_${i + 1}`}`, {
+                      project,
+                      gem_name: gemName,
+                      prompt_id: prompt_id || `prompt_${i + 1}`,
+                      text_length: metadata.text_length || 0,
+                      text: metadata.text,
+                      execution_id: execution_id || null
+                    });
+                }
+              }
+            });
+            logger.info({ 
+              project, 
+              gem_name: gemName, 
+              prompt_id: prompt_id || `prompt_${i + 1}`,
+              status: promptResult?.status,
+              hasText: !!promptResult?.copiedText
+            }, `[DEBUG] Đã hoàn thành sendNextPrompt cho prompt ${i + 1}`);
+          }
+
+          logger.info({ 
+            project, 
+            gem_name: gemName, 
+            prompt_id: prompt_id || `prompt_${i + 1}`,
+            status: promptResult?.status,
+            hasText: !!promptResult?.copiedText,
+            error: promptResult?.error
+          }, `[DEBUG] Kiểm tra kết quả prompt ${i + 1}`);
+
+          if (promptResult.status === 'success' && promptResult.copiedText) {
+            const text = promptResult.copiedText;
+            let savedPath = null;
+
+            if (outputPath) {
+              try {
+                const outputDir = path.dirname(outputPath);
+                if (!await fs.pathExists(outputDir)) {
+                  await fs.mkdirs(outputDir);
+                }
+                await fs.writeFile(outputPath, text, 'utf8');
+                savedPath = outputPath;
+                await logService.logSuccess(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'output_saved',
+                  `Đã lưu output vào file: ${outputPath}`, {
+                    project,
+                    gem_name: gemName,
+                    prompt_id: prompt_id || `prompt_${i + 1}`,
+                    output_file: outputPath
+                  });
+              } catch (saveError) {
+                await logService.logError(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'output_save_failed',
+                  `Không thể lưu output vào file: ${outputPath}`, {
+                    project,
+                    gem_name: gemName,
+                    prompt_id: prompt_id || `prompt_${i + 1}`,
+                    output_file: outputPath,
+                    error: saveError.message
+                  });
+              }
+            }
+
+            await logService.logSuccess(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'prompt_completed',
+              `Đã hoàn thành prompt ${prompt_id || `prompt_${i + 1}`}`, {
+                project,
+                gem_name: gemName,
+                prompt_id: prompt_id || `prompt_${i + 1}`,
+                text_length: text.length,
+                output_file: savedPath
+              });
+
+            results.push({
+              prompt_id: prompt_id || `prompt_${i + 1}`,
+              prompt,
+              status: 'success',
+              output: savedPath,
+              text,
+              exitPerformed: false,
+              execution_id: execution_id || null
+            });
+
+            if (exit) {
+              await logService.logInfo(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'profile_restart_starting',
+                `Bắt đầu restart profile sau prompt ${prompt_id || `prompt_${i + 1}`}`, {
+                  project,
+                  gem_name: gemName,
+                  prompt_id: prompt_id || `prompt_${i + 1}`
+                });
+
+              try {
+                await stopChromeProfile({
+                  userDataDir,
+                  profileDirName: finalProfileDirName
+                });
+
+                const { exec } = require('child_process');
+                const util = require('util');
+                const execPromise = util.promisify(exec);
+
+                let attempts = 0;
+                const maxAttempts = 10;
+                const checkInterval = 500;
+
+                while (attempts < maxAttempts) {
+                  try {
+                    const { stdout } = await execPromise(`powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'chrome.exe' -and $_.CommandLine -match '--user-data-dir=${userDataDir.replace(/\\/g, '\\\\')}' } | Select-Object -ExpandProperty ProcessId"`);
+                    const pids = stdout.trim().split('\n').filter(pid => pid.trim() && !isNaN(parseInt(pid.trim())));
+                    if (pids.length === 0) {
+                      break;
+                    }
+                  } catch (_) {
+                    break;
+                  }
+                  attempts++;
+                  await new Promise(resolve => setTimeout(resolve, checkInterval));
+                }
+
+                await new Promise(resolve => setTimeout(resolve, 1000));
+
+                const launchParams = {
+                  userDataDir,
+                  profileDirName: finalProfileDirName,
+                  ensureGmail: false,
+                  headless: false,
+                  debugPort: currentDebugPort // Giữ nguyên debugPort khi restart
+                };
+
+                logger.info({ 
+                  project, 
+                  gem_name: gemName, 
+                  debugPort: currentDebugPort,
+                  prompt_id: prompt_id || `prompt_${i + 1}`
+                }, '[DEBUG] Restart profile với debugPort');
+
+                await launchChromeProfile(launchParams);
+                
+                // Sau khi launch, đọc lại port để đảm bảo đúng
+                const { readDebugPort } = require('../services/chrome');
+                const newDebugPort = await readDebugPort(userDataDir);
+                
+                // Nếu port mới khác port yêu cầu, log warning
+                if (newDebugPort !== currentDebugPort) {
+                  logger.warn({
+                    project,
+                    gem_name: gemName,
+                    requestedPort: currentDebugPort,
+                    actualPort: newDebugPort
+                  }, '[DEBUG] Port sau restart khác với port yêu cầu');
+                }
+                
+                currentDebugPort = newDebugPort;
+
+                needsGemClick = true;
+
+                await logService.logSuccess(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'profile_restart_completed',
+                  `Đã restart profile thành công sau prompt ${prompt_id || `prompt_${i + 1}`}`, {
+                    project,
+                    gem_name: gemName,
+                    prompt_id: prompt_id || `prompt_${i + 1}`,
+                    debug_port: currentDebugPort
+                  });
+
+                results[results.length - 1].exitPerformed = true;
+              } catch (restartError) {
+                await logService.logError(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'profile_restart_failed',
+                  `Không thể restart profile sau prompt ${prompt_id || `prompt_${i + 1}`}`, {
+                    project,
+                    gem_name: gemName,
+                    prompt_id: prompt_id || `prompt_${i + 1}`,
+                    error: restartError.message
+                  });
+                results[results.length - 1].exitPerformed = false;
+              }
+            }
+          } else {
+            await logService.logError(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'prompt_failed',
+              `Không thể xử lý prompt ${prompt_id || `prompt_${i + 1}`}`, {
+                project,
+                gem_name: gemName,
+                prompt_id: prompt_id || `prompt_${i + 1}`,
+                error: promptResult.error || 'Unknown error'
+              });
+
+            results.push({
+              prompt_id: prompt_id || `prompt_${i + 1}`,
+              prompt,
+              status: 'failed',
+              error: promptResult.error || 'Unknown error',
+              exitPerformed: false,
+              execution_id: execution_id || null
+            });
+          }
+
+          logger.info({ 
+            project, 
+            gem_name: gemName, 
+            prompt_id: prompt_id || `prompt_${i + 1}`,
+            next_index: i + 1,
+            total_prompts: prompts.length,
+            will_continue: i + 1 < prompts.length
+          }, `[DEBUG] Đã xử lý xong prompt ${i + 1}, ${i + 1 < prompts.length ? 'sẽ tiếp tục' : 'đã hết prompts'}`);
+        } catch (promptError) {
+          logger.error({ 
+            project, 
+            gem_name: gemName, 
+            prompt_id: prompt_id || `prompt_${i + 1}`,
+            error: promptError.message,
+            stack: promptError.stack
+          }, `[DEBUG] Lỗi trong catch block của prompt ${i + 1}`);
+
+          await logService.logError(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'prompt_error',
+            `Lỗi khi xử lý prompt ${prompt_id || `prompt_${i + 1}`}`, {
+              project,
+              gem_name: gemName,
+              prompt_id: prompt_id || `prompt_${i + 1}`,
+              error: promptError.message
+            });
+
+          results.push({
+            prompt_id: prompt_id || `prompt_${i + 1}`,
+            prompt,
+            status: 'failed',
+            error: promptError.message,
+            exitPerformed: false,
+            execution_id: execution_id || null
+          });
+        }
+      }
+
+      logger.info({ 
+        project, 
+        gem_name: gemName, 
+        total_results: results.length,
+        success_count: results.filter(r => r.status === 'success').length,
+        failed_count: results.filter(r => r.status === 'failed').length
+      }, `[DEBUG] Đã hoàn thành tất cả prompts trong vòng lặp`);
+
+      const successCount = results.filter(r => r.status === 'success').length;
+      const failedCount = results.filter(r => r.status === 'failed').length;
+
+      await logService.logInfo(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'project_completed',
+        `Hoàn thành project: ${project}`, {
+          project,
+          gem_name: gemName,
+          total_prompts: prompts.length,
+          success_count: successCount,
+          failed_count: failedCount,
+          execution_id: execution_id || null
+        });
+
+      // Set automationStatus = 'idle' khi project hoàn thành
+      profileMonitorService.setAutomationStatus(userDataDir, finalProfileDirName, 'idle');
+
+      return res.json({
+        status: failedCount === 0 ? 'success' : (successCount > 0 ? 'partial' : 'failed'),
+        project,
+        gemName,
+        execution_id: execution_id || null,
+        results,
+        summary: {
+          total: prompts.length,
+          success: successCount,
+          failed: failedCount
+        }
+      });
+    } catch (error) {
+      await logService.logError(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'project_error',
+        `Lỗi khi xử lý project: ${gemName}`, {
+          project: gemName,
+          gem_name: gemName,
+          error: error.message,
+          execution_id: execution_id || null
+        });
+
+      // Set automationStatus = 'idle' khi có lỗi
+      profileMonitorService.setAutomationStatus(userDataDir, finalProfileDirName, 'idle');
+
+      return res.status(500).json({
+        status: 'failed',
+        project,
+        gemName,
+        execution_id: execution_id || null,
+        error: error.message,
+        results
+      });
+    }
+  } catch (err) {
     return next(err);
   }
 });

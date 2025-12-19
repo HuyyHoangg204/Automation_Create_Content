@@ -116,6 +116,91 @@ async function typeIntoEditable(page, handle, text) {
   } catch (_) { return false; }
 }
 
+async function pasteInto(page, handle, text) {
+  if (!handle) return false;
+  try {
+    // Set clipboard data in page context
+    await page.evaluate((textToPaste) => {
+      navigator.clipboard.writeText(textToPaste).catch(() => {
+        // Fallback: use execCommand
+        const textarea = document.createElement('textarea');
+        textarea.value = textToPaste;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      });
+    }, text);
+    
+    await new Promise((r) => setTimeout(r, 100));
+    
+    await handle.focus();
+    await handle.click({ clickCount: 3 }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 100));
+    
+    await page.keyboard.down('Control');
+    await page.keyboard.press('v');
+    await page.keyboard.up('Control');
+    
+    await new Promise((r) => setTimeout(r, 200));
+    return true;
+  } catch (_) { return false; }
+}
+
+async function pasteIntoEditable(page, handle, text) {
+  if (!handle) return false;
+  try {
+    // Set clipboard data in page context
+    await page.evaluate((textToPaste) => {
+      navigator.clipboard.writeText(textToPaste).catch(() => {
+        // Fallback: use execCommand
+        const textarea = document.createElement('textarea');
+        textarea.value = textToPaste;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      });
+    }, text);
+    
+    await new Promise((r) => setTimeout(r, 100));
+    
+    await handle.focus();
+    
+    // Select all existing content
+    await handle.evaluate((el) => {
+      try {
+        const sel = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      } catch (e) {
+        // Ignore
+      }
+    });
+    
+    await new Promise((r) => setTimeout(r, 100));
+    
+    await page.keyboard.down('Control');
+    await page.keyboard.press('v');
+    await page.keyboard.up('Control');
+    
+    // Trigger input event
+    await handle.evaluate((el) => {
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    
+    await new Promise((r) => setTimeout(r, 200));
+    return true;
+  } catch (_) { return false; }
+}
+
 async function findFieldByPlaceholders(page, placeholders) {
   for (const ph of placeholders) {
     // eslint-disable-next-line no-await-in-loop
@@ -734,7 +819,7 @@ async function createGem({ userDataDir, name, description, instructions, knowled
           });
           let descField = await findFieldByPlaceholders(page, ['Describe your Gem', 'Description']);
           if (!descField) descField = await findFieldByLabel(page, ['Description']);
-          if (descField) await typeInto(page, descField, description);
+          if (descField) await pasteInto(page, descField, description);
         }
         if (instructions) {
           await logService.logInfo(entityType, entityID, userID, 'gem_creating_step', 
@@ -749,9 +834,9 @@ async function createGem({ userDataDir, name, description, instructions, knowled
             // Check if contenteditable
             const isEditable = await instField.evaluate((el) => el.isContentEditable === true || el.getAttribute('contenteditable') === 'true');
             if (isEditable) {
-              await typeIntoEditable(page, instField, instructions);
+              await pasteIntoEditable(page, instField, instructions);
             } else {
-              await typeInto(page, instField, instructions);
+              await pasteInto(page, instField, instructions);
             }
           }
         }

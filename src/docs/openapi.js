@@ -142,6 +142,7 @@ const openapi = {
       post: {
         summary: 'Launch Chrome with user-data-dir/profile',
         tags: ['profile'],
+        description: 'Launch Chrome với profile cụ thể. Có thể truyền debugPort để chỉ định port cho remote debugging (hỗ trợ nhiều Chrome instances song song cho nhiều user).',
         requestBody: {
           required: true,
           content: {
@@ -152,6 +153,7 @@ const openapi = {
                   name: { type: 'string' },
                   userDataDir: { type: 'string' },
                   profileDirName: { type: 'string' },
+                  debugPort: { type: 'integer', description: 'Port cho remote debugging. QUAN TRỌNG: Mỗi Chrome instance cần port riêng. Nếu không truyền, dùng mặc định 9222 hoặc CHROME_DEBUG_PORT env.' },
                   extraArgs: { type: 'array', items: { type: 'string' } },
                   ensureGmail: { type: 'boolean', description: 'If true, open Gmail and navigate to login if not signed in' },
                 },
@@ -162,7 +164,7 @@ const openapi = {
         responses: {
           201: {
             description: 'Launched',
-            content: { 'application/json': { schema: { type: 'object', properties: { launched: { type: 'boolean' }, pid: { type: 'integer' }, userDataDir: { type: 'string' }, profileDirName: { type: 'string' }, chromePath: { type: 'string' }, launchArgs: { type: 'array', items: { type: 'string' } }, gmailCheckStatus: { type: 'string', enum: ['skipped','already_logged_in','navigated_to_login','failed'] } }, required: ['launched','pid','userDataDir','profileDirName','chromePath','launchArgs'] } } },
+            content: { 'application/json': { schema: { type: 'object', properties: { launched: { type: 'boolean' }, pid: { type: 'integer' }, userDataDir: { type: 'string' }, profileDirName: { type: 'string' }, debugPort: { type: 'integer', description: 'Port mà Chrome đang listen' }, chromePath: { type: 'string' }, launchArgs: { type: 'array', items: { type: 'string' } }, gmailCheckStatus: { type: 'string', enum: ['skipped','already_logged_in','navigated_to_login','failed'] } }, required: ['launched','pid','userDataDir','profileDirName','chromePath','launchArgs'] } } },
           },
           400: { description: 'Bad Request' },
         },
@@ -545,6 +547,130 @@ const openapi = {
           },
           400: { description: 'Bad Request - validation error' },
           404: { description: 'Profile not found' },
+        },
+      },
+    },
+    '/gemini/projects': {
+      post: {
+        summary: 'Execute project workflow: Process multiple prompts with existing Gem',
+        tags: ['gemini'],
+        description: 'Xử lý từng prompt trong list với Gem đã tồn tại. Prompt đầu tiên sẽ click vào gem, các prompt tiếp theo sẽ gửi trong cùng conversation. Nếu có flag exit, sẽ restart profile sau prompt đó. Lưu ý: Gem phải được tạo trước bằng API /gems. Entity context (entityType, entityID, userID) được lấy từ entityContextService (đã lưu khi launch Chrome) hoặc từ headers (x-entity-type, x-entity-id, x-user-id) hoặc từ body (entity_type, entity_id, user_id).',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  name: { type: 'string', description: 'Profile name to use (alternative to userDataDir)' },
+                  userDataDir: { type: 'string', description: 'Profile user-data-dir (alternative to name)' },
+                  profileDirName: { type: 'string', description: 'Profile directory name (default: "Default")' },
+                  debugPort: { type: 'integer', description: 'Chrome debugPort từ response của /launch. QUAN TRỌNG: Truyền debugPort để đảm bảo automation connect đúng Chrome instance khi có nhiều Chrome cùng chạy song song' },
+                  project: { type: 'string', description: 'Project name (ví dụ: "storyboard", "prompt")' },
+                  gemName: { type: 'string', description: 'Gem name đã tồn tại để click vào và xử lý prompts (required)' },
+                  prompts: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        prompt: { type: 'string', description: 'Prompt text để gửi cho Gemini (required)' },
+                        output: { type: 'string', description: 'File path để lưu kết quả response (optional)' },
+                        exit: { type: 'boolean', description: 'Flag để restart profile sau prompt này (optional, default: false)' },
+                        prompt_id: { type: 'string', description: 'ID của prompt để map kết quả chính xác (optional, nếu không có sẽ dùng prompt_1, prompt_2, ...)' },
+                      },
+                      required: ['prompt'],
+                    },
+                    minItems: 1,
+                    description: 'Array of prompts để xử lý tuần tự',
+                  },
+                  execution_id: { type: 'string', description: 'ID của execution để phân biệt kết quả khi nhiều user dùng chung profile (optional)' },
+                },
+                required: ['project', 'gemName', 'prompts'],
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: 'OK',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    status: { 
+                      type: 'string', 
+                      enum: ['success', 'partial', 'failed'], 
+                      description: 'Status của project: success (tất cả prompts thành công), partial (một số thành công), failed (tất cả thất bại)' 
+                    },
+                    project: { type: 'string', description: 'Project name' },
+                    gemName: { type: 'string', description: 'Gem name đã sử dụng' },
+                    execution_id: { type: 'string', nullable: true, description: 'ID của execution (nếu có)' },
+                    results: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          prompt_id: { type: 'string', description: 'ID của prompt (từ request hoặc prompt_1, prompt_2, ... nếu không có)' },
+                          prompt: { type: 'string', description: 'Prompt text đã gửi' },
+                          status: { type: 'string', enum: ['success', 'failed'], description: 'Status của prompt này' },
+                          output: { type: 'string', description: 'File path nếu đã lưu output' },
+                          text: { type: 'string', description: 'Response text từ Gemini (nếu thành công)' },
+                          error: { type: 'string', description: 'Error message (nếu thất bại)' },
+                          exitPerformed: { type: 'boolean', description: 'Có restart profile không (nếu có flag exit)' },
+                          execution_id: { type: 'string', nullable: true, description: 'ID của execution (nếu có)' },
+                        },
+                        required: ['prompt_id', 'prompt', 'status'],
+                      },
+                    },
+                    summary: {
+                      type: 'object',
+                      properties: {
+                        total: { type: 'integer', description: 'Tổng số prompts' },
+                        success: { type: 'integer', description: 'Số prompts thành công' },
+                        failed: { type: 'integer', description: 'Số prompts thất bại' },
+                      },
+                      required: ['total', 'success', 'failed'],
+                    },
+                    error: { type: 'string', description: 'Error message nếu project failed hoàn toàn' },
+                  },
+                  required: ['status', 'project', 'gemName', 'results', 'summary'],
+                },
+              },
+            },
+          },
+          400: { 
+            description: 'Bad Request - validation error',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    error: { type: 'string', enum: ['ValidationError'] },
+                    details: { type: 'array', items: { type: 'object' } },
+                  },
+                },
+              },
+            },
+          },
+          500: {
+            description: 'Internal Server Error',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    status: { type: 'string', enum: ['failed'] },
+                    project: { type: 'string' },
+                    gemName: { type: 'string' },
+                    gemCreated: { type: 'boolean' },
+                    error: { type: 'string' },
+                    results: { type: 'array', items: { type: 'object' } },
+                  },
+                },
+              },
+            },
+          },
         },
       },
     },
