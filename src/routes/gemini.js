@@ -765,6 +765,7 @@ const projectSchema = z.object({
     prompt: z.string().min(1),
     output: z.string().optional(),
     exit: z.boolean().optional().default(false),
+    merge: z.boolean().optional().default(false),
     prompt_id: z.string().optional()
   })).min(1),
   entityType: z.string().optional().default('topic'),
@@ -875,12 +876,13 @@ router.post('/projects', async (req, res, next) => {
     profileMonitorService.setAutomationStatus(userDataDir, finalProfileDirName, 'running');
 
     const results = [];
+    const globalMergeBuffer = []; // Buffer for merge=true prompts
     let needsGemClick = true;
 
     try {
       for (let i = 0; i < prompts.length; i++) {
         const promptItem = prompts[i];
-        const { prompt, output: outputPath, exit, prompt_id } = promptItem;
+        const { prompt, output: outputPath, exit, merge, prompt_id } = promptItem;
 
         logger.info({ 
           project, 
@@ -896,7 +898,8 @@ router.post('/projects', async (req, res, next) => {
             project,
             gem_name: gemName,
             prompt_id: prompt_id || `prompt_${i + 1}`,
-            prompt_preview: prompt.substring(0, 100)
+            prompt_preview: prompt.substring(0, 100),
+            isMerge: !!merge
           });
 
         try {
@@ -918,15 +921,22 @@ router.post('/projects', async (req, res, next) => {
               userID: finalUserIDFromContext,
               onProgress: async (stage, message, metadata) => {
                 if (stage === 'text_copied' && metadata && metadata.text) {
-                  await logService.logInfo(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'prompt_response_received',
-                    `Đã nhận response từ Gemini cho prompt ${prompt_id || `prompt_${i + 1}`}`, {
-                      project,
-                      gem_name: gemName,
-                      prompt_id: prompt_id || `prompt_${i + 1}`,
-                      text_length: metadata.text_length || 0,
-                      text: metadata.text,
-                      execution_id: execution_id || null
-                    });
+                  // [DEBUG] Log raw event
+                  logger.info({ prompt_id: prompt_id || `prompt_${i + 1}`, merge, text_len: metadata.text_length }, '[DEBUG] onProgress text_copied received');
+                  
+                  if (!merge) {
+                    await logService.logInfo(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'prompt_response_received',
+                      `Đã nhận response từ Gemini cho prompt ${prompt_id || `prompt_${i + 1}`}`, {
+                        project,
+                        gem_name: gemName,
+                        prompt_id: prompt_id || `prompt_${i + 1}`,
+                        text_length: metadata.text_length || 0,
+                        text: metadata.text,
+                        execution_id: execution_id || null
+                      });
+                  } else {
+                     logger.info({ prompt_id: prompt_id || `prompt_${i + 1}` }, '[DEBUG] Suppressing prompt_response_received event due to merge=true');
+                  }
                 }
               }
             });
@@ -953,15 +963,22 @@ router.post('/projects', async (req, res, next) => {
               userID: finalUserIDFromContext,
               onProgress: async (stage, message, metadata) => {
                 if (stage === 'text_copied' && metadata && metadata.text) {
-                  await logService.logInfo(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'prompt_response_received',
-                    `Đã nhận response từ Gemini cho prompt ${prompt_id || `prompt_${i + 1}`}`, {
-                      project,
-                      gem_name: gemName,
-                      prompt_id: prompt_id || `prompt_${i + 1}`,
-                      text_length: metadata.text_length || 0,
-                      text: metadata.text,
-                      execution_id: execution_id || null
-                    });
+                   // [DEBUG] Log raw event
+                  logger.info({ prompt_id: prompt_id || `prompt_${i + 1}`, merge, text_len: metadata.text_length }, '[DEBUG] onProgress (next) text_copied received');
+
+                  if (!merge) {
+                    await logService.logInfo(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'prompt_response_received',
+                      `Đã nhận response từ Gemini cho prompt ${prompt_id || `prompt_${i + 1}`}`, {
+                        project,
+                        gem_name: gemName,
+                        prompt_id: prompt_id || `prompt_${i + 1}`,
+                        text_length: metadata.text_length || 0,
+                        text: metadata.text,
+                        execution_id: execution_id || null
+                      });
+                  } else {
+                     logger.info({ prompt_id: prompt_id || `prompt_${i + 1}` }, '[DEBUG] Suppressing prompt_response_received event due to merge=true');
+                  }
                 }
               }
             });
@@ -1032,6 +1049,14 @@ router.post('/projects', async (req, res, next) => {
               exitPerformed: false,
               execution_id: execution_id || null
             });
+
+            if (merge) {
+              const lastRes = results[results.length - 1];
+              if (lastRes && lastRes.prompt_id === (prompt_id || `prompt_${i + 1}`)) {
+                  globalMergeBuffer.push(lastRes);
+                  results.pop();
+              }
+            }
 
             if (exit) {
               await logService.logInfo(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'profile_restart_starting',
@@ -1145,6 +1170,17 @@ router.post('/projects', async (req, res, next) => {
             });
           }
 
+          if (merge && promptResult?.status !== 'success') {
+             // Even if failed, if it was marked as merge, we adding it to buffer or handling fail?
+             // Simple logic: If failed, we still add to results (it was pushed above in catch block or else block)
+             // Check if the last result pushed matches this prompt
+             const lastRes = results[results.length -1];
+             if (lastRes && lastRes.prompt_id === (prompt_id || `prompt_${i + 1}`)) {
+                 globalMergeBuffer.push(lastRes);
+                 results.pop();
+             }
+          }
+
           logger.info({ 
             project, 
             gem_name: gemName, 
@@ -1178,16 +1214,46 @@ router.post('/projects', async (req, res, next) => {
             exitPerformed: false,
             execution_id: execution_id || null
           });
+          
+          if (merge) {
+             const lastRes = results[results.length -1];
+             if (lastRes && lastRes.prompt_id === (prompt_id || `prompt_${i + 1}`)) {
+                 globalMergeBuffer.push(lastRes);
+                 results.pop();
+             }
+          }
         }
       }
 
-      logger.info({ 
-        project, 
-        gem_name: gemName, 
-        total_results: results.length,
-        success_count: results.filter(r => r.status === 'success').length,
-        failed_count: results.filter(r => r.status === 'failed').length
-      }, `[DEBUG] Đã hoàn thành tất cả prompts trong vòng lặp`);
+      // Proccess Global Merge Buffer at the end
+      if (globalMergeBuffer.length > 0) {
+          const mergedText = globalMergeBuffer.map(r => r.text || '').join('\n');
+          // Use info from the LAST prompt in the buffer for the merged entry
+          const lastItem = globalMergeBuffer[globalMergeBuffer.length - 1];
+          
+          const mergedResult = {
+              ...lastItem,
+              prompt: 'MERGED_PROMPTS',
+              prompt_id: 'merged_result',
+              text: mergedText,
+              status: globalMergeBuffer.every(r => r.status === 'success') ? 'success' : 'partial_failed',
+              is_merged: true,
+              merged_count: globalMergeBuffer.length
+          };
+          
+          await logService.logSuccess(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'merged_response_received',
+            `Đã hoàn thành merge ${globalMergeBuffer.length} prompts và trả kết quả`, {
+              project,
+              gem_name: gemName,
+              prompt_id: 'merged_result',
+              text_length: mergedText.length,
+              text: mergedText, // Trả full merged text
+              merged_count: globalMergeBuffer.length
+            });
+
+          results.push(mergedResult);
+      }
+
 
       const successCount = results.filter(r => r.status === 'success').length;
       const failedCount = results.filter(r => r.status === 'failed').length;
