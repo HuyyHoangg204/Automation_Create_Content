@@ -763,17 +763,19 @@ const projectSchema = z.object({
   gemName: z.string().min(1),
   prompts: z.array(z.object({
     prompt: z.string().min(1),
-    output: z.string().optional(),
+    output: z.string().optional(), // File name only (e.g., "p1" or "p1.csv"), will be saved as .csv to userDataDir/execution_results/<execution_id>/
+    input_files: z.array(z.string()).optional(), // Array of file names (e.g., ["p1", "merged"]), will be resolved from execution_results folders
     exit: z.boolean().optional().default(false),
     merge: z.boolean().optional().default(false),
     prompt_id: z.string().optional()
   })).min(1),
+  output_merge: z.string().optional(), // File name for merged result (e.g., "merged_storyboard" or "merged_storyboard.csv"), will be saved as .csv
   entityType: z.string().optional().default('topic'),
   entityID: z.string().optional().default('unknown'),
   userID: z.string().optional().default('unknown'),
   execution_id: z.string().optional()
-}).refine((d) => !!d.name || !!d.userDataDir, {
-  message: 'Either name or userDataDir must be provided',
+}).refine((d) => !!d.name || !!d.userDataDir || !!d.debugPort, {
+  message: 'Either name, userDataDir, or debugPort must be provided',
   path: ['name'],
 });
 
@@ -792,24 +794,88 @@ router.post('/projects', async (req, res, next) => {
       project,
       gemName,
       prompts,
+      output_merge,
       entityType = 'topic',
       entityID = 'unknown',
       userID = 'unknown',
       execution_id
     } = parsed.data;
 
-    const userDataDir = await resolveUserDataDir({
-      userDataDir: inputUserDataDir,
-      name,
-      profileDirName
-    });
+    // Resolve userDataDir: ưu tiên từ request > resolve từ debugPort > resolve từ name
+    let userDataDir;
+    let resolvedName = name;
+    let resolvedProfileDirName = profileDirName;
+
+    if (inputUserDataDir || name) {
+      // Có userDataDir hoặc name trong request -> resolve như bình thường
+      userDataDir = await resolveUserDataDir({
+        userDataDir: inputUserDataDir,
+        name,
+        profileDirName
+      });
+    } else if (inputDebugPort) {
+      // Không có userDataDir/name nhưng có debugPort -> tìm từ profileMonitorService
+      const allMonitored = profileMonitorService.getAllMonitoredProfiles();
+      const profileByPort = allMonitored.find(p => p.port === inputDebugPort && p.status === 'running');
+      
+      if (profileByPort) {
+        userDataDir = profileByPort.userDataDir;
+        resolvedProfileDirName = profileByPort.profileDirName || 'Default';
+        logger.info({ 
+          debugPort: inputDebugPort,
+          foundUserDataDir: userDataDir,
+          foundProfileDirName: resolvedProfileDirName
+        }, '[Projects] Resolved userDataDir from debugPort via profileMonitor');
+      } else {
+        // Không tìm thấy trong profileMonitor -> fallback: thử đọc từ file debugPort
+        // Tìm tất cả profiles và check port trong file
+        const profilesBaseDir = process.env.CHROME_PROFILES_DIR || path.join(require('os').homedir(), 'AppData', 'Local', 'Automation_Profiles');
+        if (await fs.pathExists(profilesBaseDir)) {
+          const profileDirs = await fs.readdir(profilesBaseDir);
+          for (const profileDir of profileDirs) {
+            const profilePath = path.join(profilesBaseDir, profileDir);
+            if (await fs.pathExists(profilePath)) {
+              try {
+                const { readDebugPort } = require('../services/chrome');
+                const portFromFile = await readDebugPort(profilePath);
+                if (portFromFile === inputDebugPort) {
+                  userDataDir = profilePath;
+                  resolvedProfileDirName = 'Default';
+                  logger.info({ 
+                    debugPort: inputDebugPort,
+                    foundUserDataDir: userDataDir
+                  }, '[Projects] Resolved userDataDir from debugPort via file scan');
+                  break;
+                }
+              } catch (_) {
+                // Ignore errors when reading port
+              }
+            }
+          }
+        }
+        
+        if (!userDataDir) {
+          return res.status(400).json({ 
+            error: 'ValidationError', 
+            message: 'Cannot resolve userDataDir from debugPort. Please provide name or userDataDir.',
+            debugPort: inputDebugPort
+          });
+        }
+      }
+    } else {
+      // Không có cả 3 -> validation đã fail ở refine, nhưng để chắc chắn
+      return res.status(400).json({ 
+        error: 'ValidationError', 
+        message: 'Either name, userDataDir, or debugPort must be provided'
+      });
+    }
 
     // Lấy entity context từ entityContextService (đã lưu khi launch Chrome)
     // QUAN TRỌNG: Key phải khớp với key đã lưu trong chrome.js
     // chrome.js lưu với key = finalProfileDirName (từ profile.json hoặc getProfileDirNameFromIndex)
     // Cần resolve finalProfileDirName giống như chrome.js
     const profileJsonPath = path.join(userDataDir, 'profile.json');
-    let finalProfileDirName = profileDirName || 'Default';
+    let finalProfileDirName = resolvedProfileDirName || 'Default';
     
     if (await fs.pathExists(profileJsonPath)) {
       try {
@@ -818,9 +884,9 @@ router.post('/projects', async (req, res, next) => {
           finalProfileDirName = profileMeta.profileDirName;
         }
       } catch (_) {}
-    } else if (!profileDirName) {
+    } else if (!resolvedProfileDirName && resolvedName) {
       const { getProfileDirNameFromIndex } = require('../utils/resolveUserDataDir');
-      const profileDirNameFromIndex = await getProfileDirNameFromIndex(userDataDir, name);
+      const profileDirNameFromIndex = await getProfileDirNameFromIndex(userDataDir, resolvedName);
       finalProfileDirName = profileDirNameFromIndex || 'Default';
     }
     
@@ -869,20 +935,148 @@ router.post('/projects', async (req, res, next) => {
         project,
         gem_name: gemName,
         prompts_count: prompts.length,
-        execution_id: execution_id || null
+        execution_id: execution_id || null,
+        output_merge: output_merge || null
       });
+    
+    if (output_merge) {
+      logger.info({ output_merge, execution_id }, '[Projects] output_merge specified at project level');
+    }
 
     // Set automationStatus = 'running' để tránh idle timeout khi đang xử lý
     profileMonitorService.setAutomationStatus(userDataDir, finalProfileDirName, 'running');
+
+    // Helper function: Ensure file name has .csv extension
+    const ensureCsvExtension = (fileName) => {
+      if (!fileName) return null;
+      // If already has extension, keep it; otherwise add .csv
+      if (path.extname(fileName)) {
+        return fileName;
+      }
+      return `${fileName}.csv`;
+    };
+
+    // Helper function: Resolve full path from file name + execution_id
+    // Files are stored in: userDataDir/execution_results/<execution_id>/<filename>.csv
+    const resolveExecutionFilePath = (fileName, execId) => {
+      if (!fileName) return null;
+      if (!execId) {
+        logger.warn({ fileName }, '[Projects] No execution_id provided, cannot resolve file path');
+        return null;
+      }
+      const fileNameWithExt = ensureCsvExtension(fileName);
+      const executionResultsDir = path.join(userDataDir, 'execution_results', execId);
+      return path.join(executionResultsDir, fileNameWithExt);
+    };
+
+    // Helper function: Find file in execution_results folders (for input_files)
+    // Searches in all execution_id folders within userDataDir/execution_results/
+    // Automatically adds .csv extension if not present
+    const findExecutionFile = async (fileName) => {
+      if (!fileName) return null;
+      const fileNameWithExt = ensureCsvExtension(fileName);
+      const executionResultsBaseDir = path.join(userDataDir, 'execution_results');
+      
+      if (!await fs.pathExists(executionResultsBaseDir)) {
+        logger.warn({ fileName, fileNameWithExt, executionResultsBaseDir }, '[Projects] execution_results directory does not exist');
+        return null;
+      }
+
+      try {
+        const executionDirs = await fs.readdir(executionResultsBaseDir);
+        // Search in reverse order (newest first) to prioritize recent files
+        for (const execDir of executionDirs.reverse()) {
+          const filePath = path.join(executionResultsBaseDir, execDir, fileNameWithExt);
+          if (await fs.pathExists(filePath)) {
+            logger.info({ fileName, fileNameWithExt, foundIn: execDir, filePath }, '[Projects] Found input file');
+            return filePath;
+          }
+        }
+        logger.warn({ fileName, fileNameWithExt, executionResultsBaseDir }, '[Projects] Input file not found in any execution_results folder');
+        return null;
+      } catch (err) {
+        logger.error({ err, fileName, fileNameWithExt, executionResultsBaseDir }, '[Projects] Error searching for input file');
+        return null;
+      }
+    };
 
     const results = [];
     const globalMergeBuffer = []; // Buffer for merge=true prompts
     let needsGemClick = true;
 
+    // Close existing Gemini tabs before starting new project (Option 1: each project starts with fresh gem)
+    try {
+      const { connectToBrowserByUserDataDir } = require('../scripts/gmailLogin');
+      const { browser } = await connectToBrowserByUserDataDir(userDataDir, currentDebugPort);
+      const pages = await browser.pages();
+      
+      let closedCount = 0;
+      for (const page of pages) {
+        if (!page.isClosed()) {
+          try {
+            const pageUrl = page.url();
+            if (pageUrl.includes('gemini.google.com')) {
+              await page.close();
+              closedCount++;
+              logger.info({ url: pageUrl }, '[Projects] Closed existing Gemini tab before starting new project');
+            }
+          } catch (e) {
+            // Ignore errors when checking/closing pages
+          }
+        }
+      }
+      
+      if (closedCount > 0) {
+        logger.info({ closedCount }, '[Projects] Closed existing Gemini tabs before starting new project');
+        await logService.logInfo(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'project_starting',
+          `Đã đóng ${closedCount} tab Gemini cũ trước khi bắt đầu project mới`, {
+            project,
+            gem_name: gemName,
+            closed_tabs: closedCount
+          });
+      }
+    } catch (closeError) {
+      logger.warn({ error: closeError?.message }, '[Projects] Failed to close existing Gemini tabs, continuing anyway');
+    }
+
     try {
       for (let i = 0; i < prompts.length; i++) {
         const promptItem = prompts[i];
-        const { prompt, output: outputPath, exit, merge, prompt_id } = promptItem;
+        const { prompt, output: outputFileName, input_files, exit, merge, prompt_id } = promptItem;
+
+        // Resolve input_files: find files from previous executions
+        let resolvedInputFiles = null;
+        if (input_files && input_files.length > 0) {
+          resolvedInputFiles = [];
+          for (const inputFileName of input_files) {
+            const foundPath = await findExecutionFile(inputFileName);
+            if (foundPath) {
+              resolvedInputFiles.push(foundPath);
+            } else {
+              logger.warn({ inputFileName, prompt_id: prompt_id || `prompt_${i + 1}` }, '[Projects] Input file not found, skipping');
+            }
+          }
+          if (resolvedInputFiles.length === 0) {
+            resolvedInputFiles = null; // No valid files found
+          }
+          logger.info({ 
+            prompt_id: prompt_id || `prompt_${i + 1}`,
+            input_files,
+            resolvedInputFiles,
+            needsGemClick
+          }, '[Projects] Resolved input_files');
+        }
+
+        // Resolve output path: userDataDir/execution_results/<execution_id>/<outputFileName>
+        const outputPath = outputFileName ? resolveExecutionFilePath(outputFileName, execution_id) : null;
+        if (outputPath) {
+          logger.info({ 
+            prompt_id: prompt_id || `prompt_${i + 1}`,
+            outputFileName,
+            outputPath,
+            execution_id
+          }, '[Projects] Resolved output path');
+        }
 
         logger.info({ 
           project, 
@@ -915,6 +1109,7 @@ router.post('/projects', async (req, res, next) => {
               userDataDir,
               debugPort: currentDebugPort,
               gem: gemName,
+              listFile: resolvedInputFiles || undefined,
               prompt,
               entityType: finalEntityTypeFromContext,
               entityID: finalEntityIDFromContext,
@@ -954,6 +1149,8 @@ router.post('/projects', async (req, res, next) => {
               gem_name: gemName, 
               prompt_id: prompt_id || `prompt_${i + 1}` 
             }, `[DEBUG] Gọi sendNextPrompt cho prompt ${i + 1}`);
+            // Note: sendNextPrompt doesn't support listFile (files are already in conversation)
+            // Only sendPrompt (first prompt) needs listFile
             promptResult = await sendNextPrompt({
               userDataDir,
               debugPort: currentDebugPort,
@@ -1231,6 +1428,39 @@ router.post('/projects', async (req, res, next) => {
           // Use info from the LAST prompt in the buffer for the merged entry
           const lastItem = globalMergeBuffer[globalMergeBuffer.length - 1];
           
+          // Resolve output_merge path from project level (not from prompts)
+          const mergeOutputPath = output_merge ? resolveExecutionFilePath(output_merge, execution_id) : null;
+
+          // Save merged text to file if output_merge is specified
+          let mergeSavedPath = null;
+          if (mergeOutputPath) {
+            try {
+              const mergeOutputDir = path.dirname(mergeOutputPath);
+              if (!await fs.pathExists(mergeOutputDir)) {
+                await fs.mkdirs(mergeOutputDir);
+              }
+              await fs.writeFile(mergeOutputPath, mergedText, 'utf8');
+              mergeSavedPath = mergeOutputPath;
+              await logService.logSuccess(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'merged_output_saved',
+                `Đã lưu merged output vào file: ${mergeOutputPath}`, {
+                  project,
+                  gem_name: gemName,
+                  prompt_id: 'merged_result',
+                  output_file: mergeOutputPath,
+                  merged_count: globalMergeBuffer.length
+                });
+            } catch (saveError) {
+              await logService.logError(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'merged_output_save_failed',
+                `Không thể lưu merged output vào file: ${mergeOutputPath}`, {
+                  project,
+                  gem_name: gemName,
+                  prompt_id: 'merged_result',
+                  output_file: mergeOutputPath,
+                  error: saveError.message
+                });
+            }
+          }
+          
           const mergedResult = {
               ...lastItem,
               prompt: 'MERGED_PROMPTS',
@@ -1238,7 +1468,8 @@ router.post('/projects', async (req, res, next) => {
               text: mergedText,
               status: globalMergeBuffer.every(r => r.status === 'success') ? 'success' : 'partial_failed',
               is_merged: true,
-              merged_count: globalMergeBuffer.length
+              merged_count: globalMergeBuffer.length,
+              output: mergeSavedPath
           };
           
           await logService.logSuccess(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'merged_response_received',
@@ -1248,7 +1479,8 @@ router.post('/projects', async (req, res, next) => {
               prompt_id: 'merged_result',
               text_length: mergedText.length,
               text: mergedText, // Trả full merged text
-              merged_count: globalMergeBuffer.length
+              merged_count: globalMergeBuffer.length,
+              output_file: mergeSavedPath
             });
 
           results.push(mergedResult);

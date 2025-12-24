@@ -435,6 +435,7 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt, onPro
   const { browser } = await connectToBrowserByUserDataDir(userDataDir, debugPort);
   let status = 'unknown';
   let copiedText = null;
+  let page = null;
   try {
     await logService.logInfo(entityType, entityID, userID, 'prompt_sending_step', 
       'Đang kết nối đến Chrome và mở trang Gemini', {
@@ -442,9 +443,25 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt, onPro
         prompt_preview: prompt ? prompt.substring(0, 100) : 'unknown'
       });
 
-    const page = await browser.newPage();
+    // Option 1: Each project starts with fresh gem - close existing Gemini tabs and create new one
+    // This ensures each project works with the correct gem specified in gemName
+    const pages = await browser.pages();
+    for (const existingPage of pages) {
+      if (!existingPage.isClosed()) {
+        try {
+          const pageUrl = existingPage.url();
+          if (pageUrl.includes('gemini.google.com')) {
+            await existingPage.close();
+          }
+        } catch (e) {
+        }
+      }
+    }
 
+    // Always create a new page for new project (Option 1: fresh start for each project)
+    page = await browser.newPage();
     await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: 30000 });
+
     const host = (() => { try { return new URL(page.url()).hostname; } catch { return ''; } })();
     if (host.includes('accounts.google.com')) {
       status = 'not_logged_in';
@@ -457,8 +474,6 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt, onPro
     await new Promise((r) => setTimeout(r, 2000));
 
     // Step 1: Click "Explore Gems" or "Bot List" button in sidebar
-    logger.info({}, '[Gemini] Navigating to Bot List / Explore Gems');
-    
     await logService.logInfo(entityType, entityID, userID, 'prompt_sending_step', 
       'Đang navigate đến Explore Gems / Bot List', {
         gem_name: gem
@@ -473,7 +488,6 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt, onPro
       ).catch(() => null);
 
       if (botListButton) {
-        logger.info({}, '[Gemini] Found bot-list-side-nav-entry-button');
          // Check visibility
         const isHidden = await botListButton.evaluate((el) => {
           const style = window.getComputedStyle(el);
@@ -481,7 +495,6 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt, onPro
         });
 
         if (isHidden) {
-           logger.info({}, '[Gemini] Bot list button is hidden, trying to open sidebar');
            const menuButton = await page.$('button[data-test-id="side-nav-menu-button"]');
            if (menuButton) {
              await menuButton.click();
@@ -493,14 +506,12 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt, onPro
         await new Promise(r => setTimeout(r, 300));
         await botListButton.click();
         clickedExplore = true;
-        logger.info({}, '[Gemini] Clicked bot-list-side-nav-entry-button');
       }
     } catch (e) {
       logger.warn({ error: e.message }, '[Gemini] Failed to click bot list button');
     }
 
     if (!clickedExplore) {
-      logger.info({}, '[Gemini] Falling back to old Explore Gems selectors');
       clickedExplore = await clickSelectors(page, [
         'button[aria-label="Explore Gems"]',
         'button[aria-label*="Explore Gems" i]',
@@ -513,13 +524,11 @@ async function sendPrompt({ userDataDir, debugPort, gem, listFile, prompt, onPro
     }
     
     if (clickedExplore) {
-       logger.info({}, '[Gemini] Successfully navigated to Explore Gems / Bot List');
        await logService.logInfo(entityType, entityID, userID, 'prompt_sending_step', 
          'Đã navigate đến Explore Gems / Bot List thành công', {
            gem_name: gem
          });
     } else {
-       logger.error({}, '[Gemini] Failed to navigate to Explore Gems / Bot List');
        await logService.logWarning(entityType, entityID, userID, 'prompt_sending_step', 
          'Không thể navigate đến Explore Gems / Bot List', {
            gem_name: gem
