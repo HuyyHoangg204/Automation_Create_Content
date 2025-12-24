@@ -137,7 +137,7 @@ async function createChromeProfile({ name }) {
 
 module.exports = { createChromeProfile, getChromePathFromEnvOrDefault };
 
-async function launchChromeProfile({ name, userDataDir, profileDirName = 'Default', extraArgs = [], ensureGmail, headless }) {
+async function launchChromeProfile({ name, userDataDir, profileDirName = 'Default', debugPort: requestedDebugPort, extraArgs = [], ensureGmail, headless }) {
   const profilesBase = await ensureProfilesBaseDir();
   const chromePath = getChromePathFromEnvOrDefault();
   if (!chromePath) {
@@ -202,11 +202,18 @@ async function launchChromeProfile({ name, userDataDir, profileDirName = 'Defaul
   }
 
   // Ensure remote debugging to allow Gmail check via puppeteer-core
-  let debugPort = parseInt(process.env.CHROME_DEBUG_PORT || '9222', 10);
+  // Ưu tiên: requestedDebugPort > extraArgs > env > default 9222
+  let debugPort = requestedDebugPort || parseInt(process.env.CHROME_DEBUG_PORT || '9222', 10);
   const existingDebugArg = launchArgs.find((a) => a.startsWith('--remote-debugging-port='));
   if (existingDebugArg) {
     const p = parseInt(existingDebugArg.split('=')[1], 10);
-    if (Number.isInteger(p)) debugPort = p;
+    if (Number.isInteger(p) && !requestedDebugPort) debugPort = p;
+    // Nếu có requestedDebugPort, xóa arg cũ và thêm mới
+    if (requestedDebugPort) {
+      const idx = launchArgs.indexOf(existingDebugArg);
+      if (idx !== -1) launchArgs.splice(idx, 1);
+      launchArgs.push(`--remote-debugging-port=${debugPort}`);
+    }
   } else {
     launchArgs.push(`--remote-debugging-port=${debugPort}`);
   }
@@ -255,6 +262,7 @@ async function launchChromeProfile({ name, userDataDir, profileDirName = 'Defaul
     pid: child.pid,
     userDataDir: resolvedUserDataDir,
     profileDirName,
+    debugPort,
     chromePath,
     launchArgs,
     gmailCheckStatus,
@@ -356,6 +364,8 @@ async function readDebugPort(userDataDir) {
   const envPort = parseInt(process.env.CHROME_DEBUG_PORT || '9222', 10);
   return envPort;
 }
+
+module.exports.readDebugPort = readDebugPort;
 
 async function connectToBrowserByUserDataDir(userDataDir, preferPort) {
   if (!puppeteer) throw new Error('puppeteer-core not installed');

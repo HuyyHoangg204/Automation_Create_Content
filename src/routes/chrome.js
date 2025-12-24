@@ -135,6 +135,7 @@ const launchSchema = z.object({
   name: z.string().min(1).max(100).optional(),
   userDataDir: z.string().min(1).optional(),
   profileDirName: z.string().min(1).optional(),
+  debugPort: z.number().int().positive().optional(),
   extraArgs: z.array(z.string()).optional(),
   ensureGmail: z.boolean().optional(),
   headless: z.boolean().optional(),

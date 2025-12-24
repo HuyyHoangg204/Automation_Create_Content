@@ -8,12 +8,13 @@ const { downloadFiles } = require('../utils/downloadFile');
 const { createGem } = require('../scripts/gemini');
 const { saveGoogleAccount } = require('../utils/googleAccount');
 const { listGems } = require('../scripts/listGems');
-const { sendPrompt } = require('../scripts/sendPrompt');
+const { sendPrompt, sendNextPrompt } = require('../scripts/sendPrompt');
 const { launchNotebookLM } = require('../scripts/notebooklm');
 const logService = require('../services/logService');
 const entityContextService = require('../services/entityContext');
 const profileMonitorService = require('../services/profileMonitor');
 const profileStatusEvent = require('../services/profileStatusEvent');
+const { stopChromeProfile, launchChromeProfile } = require('../services/chrome');
 
 const router = express.Router();
 
@@ -556,6 +557,9 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
       gem,
       listFile: [outlineFilePath],
       prompt: sendPromptText || 'Đây là dàn ý đã được tạo, hãy phân tích và tạo nội dung chi tiết dựa trên dàn ý này.',
+      entityType: finalEntityType,
+      entityID: finalEntityID,
+      userID: finalUserID,
       onProgress: async (stage, message, metadata) => {
         if (stage === 'text_copied' && metadata && metadata.text) {
           await logService.logInfo(finalEntityType, finalEntityID, finalUserID, 'text_copied',
@@ -746,6 +750,793 @@ router.post('/accounts/setup', async (req, res, next) => {
     }
   } catch (err) {
     logger.error({ err, stack: err?.stack }, '[Gemini] Error in setup account API');
+    return next(err);
+  }
+});
+
+const projectSchema = z.object({
+  name: z.string().min(1).optional(),
+  userDataDir: z.string().min(1).optional(),
+  profileDirName: z.string().min(1).optional().default('Default'),
+  debugPort: z.number().optional(),
+  project: z.string().min(1),
+  gemName: z.string().min(1),
+  prompts: z.array(z.object({
+    prompt: z.string().min(1),
+    output: z.string().optional(), // File name only (e.g., "p1" or "p1.csv"), will be saved as .csv to userDataDir/execution_results/<execution_id>/
+    input_files: z.array(z.string()).optional(), // Array of file names (e.g., ["p1", "merged"]), will be resolved from execution_results folders
+    exit: z.boolean().optional().default(false),
+    merge: z.boolean().optional().default(false),
+    prompt_id: z.string().optional()
+  })).min(1),
+  output_merge: z.string().optional(), // File name for merged result (e.g., "merged_storyboard" or "merged_storyboard.csv"), will be saved as .csv
+  entityType: z.string().optional().default('topic'),
+  entityID: z.string().optional().default('unknown'),
+  userID: z.string().optional().default('unknown'),
+  execution_id: z.string().optional()
+}).refine((d) => !!d.name || !!d.userDataDir || !!d.debugPort, {
+  message: 'Either name, userDataDir, or debugPort must be provided',
+  path: ['name'],
+});
+
+router.post('/projects', async (req, res, next) => {
+  try {
+    const parsed = projectSchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'ValidationError', details: parsed.error.issues });
+    }
+
+    const {
+      name,
+      userDataDir: inputUserDataDir,
+      profileDirName,
+      debugPort: inputDebugPort,
+      project,
+      gemName,
+      prompts,
+      output_merge,
+      entityType = 'topic',
+      entityID = 'unknown',
+      userID = 'unknown',
+      execution_id
+    } = parsed.data;
+
+    // Resolve userDataDir: ưu tiên từ request > resolve từ debugPort > resolve từ name
+    let userDataDir;
+    let resolvedName = name;
+    let resolvedProfileDirName = profileDirName;
+
+    if (inputUserDataDir || name) {
+      // Có userDataDir hoặc name trong request -> resolve như bình thường
+      userDataDir = await resolveUserDataDir({
+        userDataDir: inputUserDataDir,
+        name,
+        profileDirName
+      });
+    } else if (inputDebugPort) {
+      // Không có userDataDir/name nhưng có debugPort -> tìm từ profileMonitorService
+      const allMonitored = profileMonitorService.getAllMonitoredProfiles();
+      const profileByPort = allMonitored.find(p => p.port === inputDebugPort && p.status === 'running');
+      
+      if (profileByPort) {
+        userDataDir = profileByPort.userDataDir;
+        resolvedProfileDirName = profileByPort.profileDirName || 'Default';
+        logger.info({ 
+          debugPort: inputDebugPort,
+          foundUserDataDir: userDataDir,
+          foundProfileDirName: resolvedProfileDirName
+        }, '[Projects] Resolved userDataDir from debugPort via profileMonitor');
+      } else {
+        // Không tìm thấy trong profileMonitor -> fallback: thử đọc từ file debugPort
+        // Tìm tất cả profiles và check port trong file
+        const profilesBaseDir = process.env.CHROME_PROFILES_DIR || path.join(require('os').homedir(), 'AppData', 'Local', 'Automation_Profiles');
+        if (await fs.pathExists(profilesBaseDir)) {
+          const profileDirs = await fs.readdir(profilesBaseDir);
+          for (const profileDir of profileDirs) {
+            const profilePath = path.join(profilesBaseDir, profileDir);
+            if (await fs.pathExists(profilePath)) {
+              try {
+                const { readDebugPort } = require('../services/chrome');
+                const portFromFile = await readDebugPort(profilePath);
+                if (portFromFile === inputDebugPort) {
+                  userDataDir = profilePath;
+                  resolvedProfileDirName = 'Default';
+                  logger.info({ 
+                    debugPort: inputDebugPort,
+                    foundUserDataDir: userDataDir
+                  }, '[Projects] Resolved userDataDir from debugPort via file scan');
+                  break;
+                }
+              } catch (_) {
+                // Ignore errors when reading port
+              }
+            }
+          }
+        }
+        
+        if (!userDataDir) {
+          return res.status(400).json({ 
+            error: 'ValidationError', 
+            message: 'Cannot resolve userDataDir from debugPort. Please provide name or userDataDir.',
+            debugPort: inputDebugPort
+          });
+        }
+      }
+    } else {
+      // Không có cả 3 -> validation đã fail ở refine, nhưng để chắc chắn
+      return res.status(400).json({ 
+        error: 'ValidationError', 
+        message: 'Either name, userDataDir, or debugPort must be provided'
+      });
+    }
+
+    // Lấy entity context từ entityContextService (đã lưu khi launch Chrome)
+    // QUAN TRỌNG: Key phải khớp với key đã lưu trong chrome.js
+    // chrome.js lưu với key = finalProfileDirName (từ profile.json hoặc getProfileDirNameFromIndex)
+    // Cần resolve finalProfileDirName giống như chrome.js
+    const profileJsonPath = path.join(userDataDir, 'profile.json');
+    let finalProfileDirName = resolvedProfileDirName || 'Default';
+    
+    if (await fs.pathExists(profileJsonPath)) {
+      try {
+        const profileMeta = await fs.readJson(profileJsonPath);
+        if (profileMeta.profileDirName) {
+          finalProfileDirName = profileMeta.profileDirName;
+        }
+      } catch (_) {}
+    } else if (!resolvedProfileDirName && resolvedName) {
+      const { getProfileDirNameFromIndex } = require('../utils/resolveUserDataDir');
+      const profileDirNameFromIndex = await getProfileDirNameFromIndex(userDataDir, resolvedName);
+      finalProfileDirName = profileDirNameFromIndex || 'Default';
+    }
+    
+    // Dùng finalProfileDirName làm key (giống chrome.js)
+    const contextKey = finalProfileDirName;
+    const savedContext = entityContextService.get(contextKey);
+
+    let finalEntityTypeFromContext = 'topic';
+    let finalEntityIDFromContext = 'unknown';
+    let finalUserIDFromContext = 'unknown';
+
+    if (savedContext) {
+      finalEntityTypeFromContext = savedContext.entityType || 'topic';
+      finalEntityIDFromContext = savedContext.entityID || 'unknown';
+      finalUserIDFromContext = savedContext.userID || 'unknown';
+    } else {
+      finalEntityTypeFromContext = req.headers['x-entity-type'] || req.body.entity_type || entityType || 'topic';
+      finalEntityIDFromContext = req.headers['x-entity-id'] || req.body.entity_id || entityID || 'unknown';
+      finalUserIDFromContext = req.headers['x-user-id'] || req.body.user_id || userID || 'unknown';
+    }
+
+    // Resolve debugPort: ưu tiên từ request > profileMonitor > file
+    let currentDebugPort;
+    
+    if (inputDebugPort) {
+      // Ưu tiên debugPort từ request (cho phép nhiều Chrome instances song song)
+      currentDebugPort = inputDebugPort;
+    } else {
+      // Fallback: lấy từ profileMonitor hoặc file
+      const statusKey = finalProfileDirName;
+      const allMonitored = profileMonitorService.getAllMonitoredProfiles();
+      const existingProfile = allMonitored.find(p => 
+        p.userDataDir === userDataDir && p.profileDirName === finalProfileDirName && p.status === 'running'
+      );
+      
+      if (existingProfile && existingProfile.port) {
+        currentDebugPort = existingProfile.port;
+      } else {
+        const { readDebugPort } = require('../services/chrome');
+        currentDebugPort = await readDebugPort(userDataDir);
+      }
+    }
+
+    await logService.logInfo(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'project_starting',
+      `Bắt đầu project: ${project}`, {
+        project,
+        gem_name: gemName,
+        prompts_count: prompts.length,
+        execution_id: execution_id || null,
+        output_merge: output_merge || null
+      });
+    
+    if (output_merge) {
+      logger.info({ output_merge, execution_id }, '[Projects] output_merge specified at project level');
+    }
+
+    // Set automationStatus = 'running' để tránh idle timeout khi đang xử lý
+    profileMonitorService.setAutomationStatus(userDataDir, finalProfileDirName, 'running');
+
+    // Helper function: Ensure file name has .csv extension
+    const ensureCsvExtension = (fileName) => {
+      if (!fileName) return null;
+      // If already has extension, keep it; otherwise add .csv
+      if (path.extname(fileName)) {
+        return fileName;
+      }
+      return `${fileName}.csv`;
+    };
+
+    // Helper function: Resolve full path from file name + execution_id
+    // Files are stored in: userDataDir/execution_results/<execution_id>/<filename>.csv
+    const resolveExecutionFilePath = (fileName, execId) => {
+      if (!fileName) return null;
+      if (!execId) {
+        logger.warn({ fileName }, '[Projects] No execution_id provided, cannot resolve file path');
+        return null;
+      }
+      const fileNameWithExt = ensureCsvExtension(fileName);
+      const executionResultsDir = path.join(userDataDir, 'execution_results', execId);
+      return path.join(executionResultsDir, fileNameWithExt);
+    };
+
+    // Helper function: Find file in execution_results folders (for input_files)
+    // Searches in all execution_id folders within userDataDir/execution_results/
+    // Automatically adds .csv extension if not present
+    const findExecutionFile = async (fileName) => {
+      if (!fileName) return null;
+      const fileNameWithExt = ensureCsvExtension(fileName);
+      const executionResultsBaseDir = path.join(userDataDir, 'execution_results');
+      
+      if (!await fs.pathExists(executionResultsBaseDir)) {
+        logger.warn({ fileName, fileNameWithExt, executionResultsBaseDir }, '[Projects] execution_results directory does not exist');
+        return null;
+      }
+
+      try {
+        const executionDirs = await fs.readdir(executionResultsBaseDir);
+        // Search in reverse order (newest first) to prioritize recent files
+        for (const execDir of executionDirs.reverse()) {
+          const filePath = path.join(executionResultsBaseDir, execDir, fileNameWithExt);
+          if (await fs.pathExists(filePath)) {
+            logger.info({ fileName, fileNameWithExt, foundIn: execDir, filePath }, '[Projects] Found input file');
+            return filePath;
+          }
+        }
+        logger.warn({ fileName, fileNameWithExt, executionResultsBaseDir }, '[Projects] Input file not found in any execution_results folder');
+        return null;
+      } catch (err) {
+        logger.error({ err, fileName, fileNameWithExt, executionResultsBaseDir }, '[Projects] Error searching for input file');
+        return null;
+      }
+    };
+
+    const results = [];
+    const globalMergeBuffer = []; // Buffer for merge=true prompts
+    let needsGemClick = true;
+
+    // Close existing Gemini tabs before starting new project (Option 1: each project starts with fresh gem)
+    try {
+      const { connectToBrowserByUserDataDir } = require('../scripts/gmailLogin');
+      const { browser } = await connectToBrowserByUserDataDir(userDataDir, currentDebugPort);
+      const pages = await browser.pages();
+      
+      let closedCount = 0;
+      for (const page of pages) {
+        if (!page.isClosed()) {
+          try {
+            const pageUrl = page.url();
+            if (pageUrl.includes('gemini.google.com')) {
+              await page.close();
+              closedCount++;
+              logger.info({ url: pageUrl }, '[Projects] Closed existing Gemini tab before starting new project');
+            }
+          } catch (e) {
+            // Ignore errors when checking/closing pages
+          }
+        }
+      }
+      
+      if (closedCount > 0) {
+        logger.info({ closedCount }, '[Projects] Closed existing Gemini tabs before starting new project');
+        await logService.logInfo(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'project_starting',
+          `Đã đóng ${closedCount} tab Gemini cũ trước khi bắt đầu project mới`, {
+            project,
+            gem_name: gemName,
+            closed_tabs: closedCount
+          });
+      }
+    } catch (closeError) {
+      logger.warn({ error: closeError?.message }, '[Projects] Failed to close existing Gemini tabs, continuing anyway');
+    }
+
+    try {
+      for (let i = 0; i < prompts.length; i++) {
+        const promptItem = prompts[i];
+        const { prompt, output: outputFileName, input_files, exit, merge, prompt_id } = promptItem;
+
+        // Resolve input_files: find files from previous executions
+        let resolvedInputFiles = null;
+        if (input_files && input_files.length > 0) {
+          resolvedInputFiles = [];
+          for (const inputFileName of input_files) {
+            const foundPath = await findExecutionFile(inputFileName);
+            if (foundPath) {
+              resolvedInputFiles.push(foundPath);
+            } else {
+              logger.warn({ inputFileName, prompt_id: prompt_id || `prompt_${i + 1}` }, '[Projects] Input file not found, skipping');
+            }
+          }
+          if (resolvedInputFiles.length === 0) {
+            resolvedInputFiles = null; // No valid files found
+          }
+          logger.info({ 
+            prompt_id: prompt_id || `prompt_${i + 1}`,
+            input_files,
+            resolvedInputFiles,
+            needsGemClick
+          }, '[Projects] Resolved input_files');
+        }
+
+        // Resolve output path: userDataDir/execution_results/<execution_id>/<outputFileName>
+        const outputPath = outputFileName ? resolveExecutionFilePath(outputFileName, execution_id) : null;
+        if (outputPath) {
+          logger.info({ 
+            prompt_id: prompt_id || `prompt_${i + 1}`,
+            outputFileName,
+            outputPath,
+            execution_id
+          }, '[Projects] Resolved output path');
+        }
+
+        logger.info({ 
+          project, 
+          gem_name: gemName, 
+          prompt_index: i, 
+          total_prompts: prompts.length,
+          prompt_id: prompt_id || `prompt_${i + 1}`,
+          needsGemClick 
+        }, `[DEBUG] Bắt đầu vòng lặp prompt ${i + 1}/${prompts.length}`);
+
+        await logService.logInfo(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'prompt_processing',
+          `Đang xử lý prompt ${i + 1}/${prompts.length}`, {
+            project,
+            gem_name: gemName,
+            prompt_id: prompt_id || `prompt_${i + 1}`,
+            prompt_preview: prompt.substring(0, 100),
+            isMerge: !!merge
+          });
+
+        try {
+          let promptResult;
+          
+          if (needsGemClick) {
+            logger.info({ 
+              project, 
+              gem_name: gemName, 
+              prompt_id: prompt_id || `prompt_${i + 1}` 
+            }, `[DEBUG] Gọi sendPrompt cho prompt ${i + 1}`);
+            promptResult = await sendPrompt({
+              userDataDir,
+              debugPort: currentDebugPort,
+              gem: gemName,
+              listFile: resolvedInputFiles || undefined,
+              prompt,
+              entityType: finalEntityTypeFromContext,
+              entityID: finalEntityIDFromContext,
+              userID: finalUserIDFromContext,
+              onProgress: async (stage, message, metadata) => {
+                if (stage === 'text_copied' && metadata && metadata.text) {
+                  // [DEBUG] Log raw event
+                  logger.info({ prompt_id: prompt_id || `prompt_${i + 1}`, merge, text_len: metadata.text_length }, '[DEBUG] onProgress text_copied received');
+                  
+                  if (!merge) {
+                    await logService.logInfo(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'prompt_response_received',
+                      `Đã nhận response từ Gemini cho prompt ${prompt_id || `prompt_${i + 1}`}`, {
+                        project,
+                        gem_name: gemName,
+                        prompt_id: prompt_id || `prompt_${i + 1}`,
+                        text_length: metadata.text_length || 0,
+                        text: metadata.text,
+                        execution_id: execution_id || null
+                      });
+                  } else {
+                     logger.info({ prompt_id: prompt_id || `prompt_${i + 1}` }, '[DEBUG] Suppressing prompt_response_received event due to merge=true');
+                  }
+                }
+              }
+            });
+            needsGemClick = false;
+            logger.info({ 
+              project, 
+              gem_name: gemName, 
+              prompt_id: prompt_id || `prompt_${i + 1}`,
+              status: promptResult?.status,
+              hasText: !!promptResult?.copiedText
+            }, `[DEBUG] Đã hoàn thành sendPrompt cho prompt ${i + 1}`);
+          } else {
+            logger.info({ 
+              project, 
+              gem_name: gemName, 
+              prompt_id: prompt_id || `prompt_${i + 1}` 
+            }, `[DEBUG] Gọi sendNextPrompt cho prompt ${i + 1}`);
+            // Note: sendNextPrompt doesn't support listFile (files are already in conversation)
+            // Only sendPrompt (first prompt) needs listFile
+            promptResult = await sendNextPrompt({
+              userDataDir,
+              debugPort: currentDebugPort,
+              prompt,
+              entityType: finalEntityTypeFromContext,
+              entityID: finalEntityIDFromContext,
+              userID: finalUserIDFromContext,
+              onProgress: async (stage, message, metadata) => {
+                if (stage === 'text_copied' && metadata && metadata.text) {
+                   // [DEBUG] Log raw event
+                  logger.info({ prompt_id: prompt_id || `prompt_${i + 1}`, merge, text_len: metadata.text_length }, '[DEBUG] onProgress (next) text_copied received');
+
+                  if (!merge) {
+                    await logService.logInfo(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'prompt_response_received',
+                      `Đã nhận response từ Gemini cho prompt ${prompt_id || `prompt_${i + 1}`}`, {
+                        project,
+                        gem_name: gemName,
+                        prompt_id: prompt_id || `prompt_${i + 1}`,
+                        text_length: metadata.text_length || 0,
+                        text: metadata.text,
+                        execution_id: execution_id || null
+                      });
+                  } else {
+                     logger.info({ prompt_id: prompt_id || `prompt_${i + 1}` }, '[DEBUG] Suppressing prompt_response_received event due to merge=true');
+                  }
+                }
+              }
+            });
+            logger.info({ 
+              project, 
+              gem_name: gemName, 
+              prompt_id: prompt_id || `prompt_${i + 1}`,
+              status: promptResult?.status,
+              hasText: !!promptResult?.copiedText
+            }, `[DEBUG] Đã hoàn thành sendNextPrompt cho prompt ${i + 1}`);
+          }
+
+          logger.info({ 
+            project, 
+            gem_name: gemName, 
+            prompt_id: prompt_id || `prompt_${i + 1}`,
+            status: promptResult?.status,
+            hasText: !!promptResult?.copiedText,
+            error: promptResult?.error
+          }, `[DEBUG] Kiểm tra kết quả prompt ${i + 1}`);
+
+          if (promptResult.status === 'success' && promptResult.copiedText) {
+            const text = promptResult.copiedText;
+            let savedPath = null;
+
+            if (outputPath) {
+              try {
+                const outputDir = path.dirname(outputPath);
+                if (!await fs.pathExists(outputDir)) {
+                  await fs.mkdirs(outputDir);
+                }
+                await fs.writeFile(outputPath, text, 'utf8');
+                savedPath = outputPath;
+                await logService.logSuccess(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'output_saved',
+                  `Đã lưu output vào file: ${outputPath}`, {
+                    project,
+                    gem_name: gemName,
+                    prompt_id: prompt_id || `prompt_${i + 1}`,
+                    output_file: outputPath
+                  });
+              } catch (saveError) {
+                await logService.logError(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'output_save_failed',
+                  `Không thể lưu output vào file: ${outputPath}`, {
+                    project,
+                    gem_name: gemName,
+                    prompt_id: prompt_id || `prompt_${i + 1}`,
+                    output_file: outputPath,
+                    error: saveError.message
+                  });
+              }
+            }
+
+            await logService.logSuccess(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'prompt_completed',
+              `Đã hoàn thành prompt ${prompt_id || `prompt_${i + 1}`}`, {
+                project,
+                gem_name: gemName,
+                prompt_id: prompt_id || `prompt_${i + 1}`,
+                text_length: text.length,
+                output_file: savedPath
+              });
+
+            results.push({
+              prompt_id: prompt_id || `prompt_${i + 1}`,
+              prompt,
+              status: 'success',
+              output: savedPath,
+              text,
+              exitPerformed: false,
+              execution_id: execution_id || null
+            });
+
+            if (merge) {
+              const lastRes = results[results.length - 1];
+              if (lastRes && lastRes.prompt_id === (prompt_id || `prompt_${i + 1}`)) {
+                  globalMergeBuffer.push(lastRes);
+                  results.pop();
+              }
+            }
+
+            if (exit) {
+              await logService.logInfo(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'profile_restart_starting',
+                `Bắt đầu restart profile sau prompt ${prompt_id || `prompt_${i + 1}`}`, {
+                  project,
+                  gem_name: gemName,
+                  prompt_id: prompt_id || `prompt_${i + 1}`
+                });
+
+              try {
+                await stopChromeProfile({
+                  userDataDir,
+                  profileDirName: finalProfileDirName
+                });
+
+                const { exec } = require('child_process');
+                const util = require('util');
+                const execPromise = util.promisify(exec);
+
+                let attempts = 0;
+                const maxAttempts = 10;
+                const checkInterval = 500;
+
+                while (attempts < maxAttempts) {
+                  try {
+                    const { stdout } = await execPromise(`powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'chrome.exe' -and $_.CommandLine -match '--user-data-dir=${userDataDir.replace(/\\/g, '\\\\')}' } | Select-Object -ExpandProperty ProcessId"`);
+                    const pids = stdout.trim().split('\n').filter(pid => pid.trim() && !isNaN(parseInt(pid.trim())));
+                    if (pids.length === 0) {
+                      break;
+                    }
+                  } catch (_) {
+                    break;
+                  }
+                  attempts++;
+                  await new Promise(resolve => setTimeout(resolve, checkInterval));
+                }
+
+                await new Promise(resolve => setTimeout(resolve, 1000));
+
+                const launchParams = {
+                  userDataDir,
+                  profileDirName: finalProfileDirName,
+                  ensureGmail: false,
+                  headless: false,
+                  debugPort: currentDebugPort // Giữ nguyên debugPort khi restart
+                };
+
+                logger.info({ 
+                  project, 
+                  gem_name: gemName, 
+                  debugPort: currentDebugPort,
+                  prompt_id: prompt_id || `prompt_${i + 1}`
+                }, '[DEBUG] Restart profile với debugPort');
+
+                await launchChromeProfile(launchParams);
+                
+                // Sau khi launch, đọc lại port để đảm bảo đúng
+                const { readDebugPort } = require('../services/chrome');
+                const newDebugPort = await readDebugPort(userDataDir);
+                
+                // Nếu port mới khác port yêu cầu, log warning
+                if (newDebugPort !== currentDebugPort) {
+                  logger.warn({
+                    project,
+                    gem_name: gemName,
+                    requestedPort: currentDebugPort,
+                    actualPort: newDebugPort
+                  }, '[DEBUG] Port sau restart khác với port yêu cầu');
+                }
+                
+                currentDebugPort = newDebugPort;
+
+                needsGemClick = true;
+
+                await logService.logSuccess(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'profile_restart_completed',
+                  `Đã restart profile thành công sau prompt ${prompt_id || `prompt_${i + 1}`}`, {
+                    project,
+                    gem_name: gemName,
+                    prompt_id: prompt_id || `prompt_${i + 1}`,
+                    debug_port: currentDebugPort
+                  });
+
+                results[results.length - 1].exitPerformed = true;
+              } catch (restartError) {
+                await logService.logError(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'profile_restart_failed',
+                  `Không thể restart profile sau prompt ${prompt_id || `prompt_${i + 1}`}`, {
+                    project,
+                    gem_name: gemName,
+                    prompt_id: prompt_id || `prompt_${i + 1}`,
+                    error: restartError.message
+                  });
+                results[results.length - 1].exitPerformed = false;
+              }
+            }
+          } else {
+            await logService.logError(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'prompt_failed',
+              `Không thể xử lý prompt ${prompt_id || `prompt_${i + 1}`}`, {
+                project,
+                gem_name: gemName,
+                prompt_id: prompt_id || `prompt_${i + 1}`,
+                error: promptResult.error || 'Unknown error'
+              });
+
+            results.push({
+              prompt_id: prompt_id || `prompt_${i + 1}`,
+              prompt,
+              status: 'failed',
+              error: promptResult.error || 'Unknown error',
+              exitPerformed: false,
+              execution_id: execution_id || null
+            });
+          }
+
+          if (merge && promptResult?.status !== 'success') {
+             // Even if failed, if it was marked as merge, we adding it to buffer or handling fail?
+             // Simple logic: If failed, we still add to results (it was pushed above in catch block or else block)
+             // Check if the last result pushed matches this prompt
+             const lastRes = results[results.length -1];
+             if (lastRes && lastRes.prompt_id === (prompt_id || `prompt_${i + 1}`)) {
+                 globalMergeBuffer.push(lastRes);
+                 results.pop();
+             }
+          }
+
+          logger.info({ 
+            project, 
+            gem_name: gemName, 
+            prompt_id: prompt_id || `prompt_${i + 1}`,
+            next_index: i + 1,
+            total_prompts: prompts.length,
+            will_continue: i + 1 < prompts.length
+          }, `[DEBUG] Đã xử lý xong prompt ${i + 1}, ${i + 1 < prompts.length ? 'sẽ tiếp tục' : 'đã hết prompts'}`);
+        } catch (promptError) {
+          logger.error({ 
+            project, 
+            gem_name: gemName, 
+            prompt_id: prompt_id || `prompt_${i + 1}`,
+            error: promptError.message,
+            stack: promptError.stack
+          }, `[DEBUG] Lỗi trong catch block của prompt ${i + 1}`);
+
+          await logService.logError(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'prompt_error',
+            `Lỗi khi xử lý prompt ${prompt_id || `prompt_${i + 1}`}`, {
+              project,
+              gem_name: gemName,
+              prompt_id: prompt_id || `prompt_${i + 1}`,
+              error: promptError.message
+            });
+
+          results.push({
+            prompt_id: prompt_id || `prompt_${i + 1}`,
+            prompt,
+            status: 'failed',
+            error: promptError.message,
+            exitPerformed: false,
+            execution_id: execution_id || null
+          });
+          
+          if (merge) {
+             const lastRes = results[results.length -1];
+             if (lastRes && lastRes.prompt_id === (prompt_id || `prompt_${i + 1}`)) {
+                 globalMergeBuffer.push(lastRes);
+                 results.pop();
+             }
+          }
+        }
+      }
+
+      // Proccess Global Merge Buffer at the end
+      if (globalMergeBuffer.length > 0) {
+          const mergedText = globalMergeBuffer.map(r => r.text || '').join('\n');
+          // Use info from the LAST prompt in the buffer for the merged entry
+          const lastItem = globalMergeBuffer[globalMergeBuffer.length - 1];
+          
+          // Resolve output_merge path from project level (not from prompts)
+          const mergeOutputPath = output_merge ? resolveExecutionFilePath(output_merge, execution_id) : null;
+
+          // Save merged text to file if output_merge is specified
+          let mergeSavedPath = null;
+          if (mergeOutputPath) {
+            try {
+              const mergeOutputDir = path.dirname(mergeOutputPath);
+              if (!await fs.pathExists(mergeOutputDir)) {
+                await fs.mkdirs(mergeOutputDir);
+              }
+              await fs.writeFile(mergeOutputPath, mergedText, 'utf8');
+              mergeSavedPath = mergeOutputPath;
+              await logService.logSuccess(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'merged_output_saved',
+                `Đã lưu merged output vào file: ${mergeOutputPath}`, {
+                  project,
+                  gem_name: gemName,
+                  prompt_id: 'merged_result',
+                  output_file: mergeOutputPath,
+                  merged_count: globalMergeBuffer.length
+                });
+            } catch (saveError) {
+              await logService.logError(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'merged_output_save_failed',
+                `Không thể lưu merged output vào file: ${mergeOutputPath}`, {
+                  project,
+                  gem_name: gemName,
+                  prompt_id: 'merged_result',
+                  output_file: mergeOutputPath,
+                  error: saveError.message
+                });
+            }
+          }
+          
+          const mergedResult = {
+              ...lastItem,
+              prompt: 'MERGED_PROMPTS',
+              prompt_id: 'merged_result',
+              text: mergedText,
+              status: globalMergeBuffer.every(r => r.status === 'success') ? 'success' : 'partial_failed',
+              is_merged: true,
+              merged_count: globalMergeBuffer.length,
+              output: mergeSavedPath
+          };
+          
+          await logService.logSuccess(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'merged_response_received',
+            `Đã hoàn thành merge ${globalMergeBuffer.length} prompts và trả kết quả`, {
+              project,
+              gem_name: gemName,
+              prompt_id: 'merged_result',
+              text_length: mergedText.length,
+              text: mergedText, // Trả full merged text
+              merged_count: globalMergeBuffer.length,
+              output_file: mergeSavedPath
+            });
+
+          results.push(mergedResult);
+      }
+
+
+      const successCount = results.filter(r => r.status === 'success').length;
+      const failedCount = results.filter(r => r.status === 'failed').length;
+
+      await logService.logInfo(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'project_completed',
+        `Hoàn thành project: ${project}`, {
+          project,
+          gem_name: gemName,
+          total_prompts: prompts.length,
+          success_count: successCount,
+          failed_count: failedCount,
+          execution_id: execution_id || null
+        });
+
+      // Set automationStatus = 'idle' khi project hoàn thành
+      profileMonitorService.setAutomationStatus(userDataDir, finalProfileDirName, 'idle');
+
+      return res.json({
+        status: failedCount === 0 ? 'success' : (successCount > 0 ? 'partial' : 'failed'),
+        project,
+        gemName,
+        execution_id: execution_id || null,
+        results,
+        summary: {
+          total: prompts.length,
+          success: successCount,
+          failed: failedCount
+        }
+      });
+    } catch (error) {
+      await logService.logError(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'project_error',
+        `Lỗi khi xử lý project: ${gemName}`, {
+          project: gemName,
+          gem_name: gemName,
+          error: error.message,
+          execution_id: execution_id || null
+        });
+
+      // Set automationStatus = 'idle' khi có lỗi
+      profileMonitorService.setAutomationStatus(userDataDir, finalProfileDirName, 'idle');
+
+      return res.status(500).json({
+        status: 'failed',
+        project,
+        gemName,
+        execution_id: execution_id || null,
+        error: error.message,
+        results
+      });
+    }
+  } catch (err) {
     return next(err);
   }
 });
