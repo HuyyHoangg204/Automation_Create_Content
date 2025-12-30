@@ -38,13 +38,13 @@ router.post('/gems', async (req, res, next) => {
     if (!parsed.success) {
       return res.status(400).json({ error: 'ValidationError', details: parsed.error.issues });
     }
-
+    
     const { name, userDataDir: inputUserDataDir, profileDirName, gemName, description, instructions, knowledgeFiles, debugPort } = parsed.data;
 
     // Extract entity info
     const entityID = req.headers['x-entity-id'] || req.body.entity_id || 'unknown';
     const userID = req.headers['x-user-id'] || req.body.user_id || 'unknown';
-
+    
     // Auto-resolve userDataDir từ tên folder (hỗ trợ các máy khác nhau với user khác nhau)
     const userDataDir = await resolveUserDataDir({
       userDataDir: inputUserDataDir,
@@ -78,12 +78,12 @@ router.post('/gems', async (req, res, next) => {
     // Dùng finalProfileDirName làm key (giống chrome.js)
     const contextKey = finalProfileDirName;
     const savedContext = entityContextService.get(contextKey);
-
+    
     // Extract entity info: ưu tiên context đã lưu, sau đó headers, cuối cùng body, fallback "unknown"
     let finalEntityType = 'topic';
     let finalEntityID = 'unknown';
     let finalUserID = 'unknown';
-
+    
     if (savedContext) {
       finalEntityType = savedContext.entityType || 'topic';
       finalEntityID = savedContext.entityID || 'unknown';
@@ -97,7 +97,7 @@ router.post('/gems', async (req, res, next) => {
 
     // Bước 2: Download files từ URLs về profile folder (nếu knowledgeFiles chứa URLs)
     let finalKnowledgeFiles = knowledgeFiles || [];
-
+    
     if (knowledgeFiles && knowledgeFiles.length > 0) {
       // Normalize URLs: thêm http:// nếu thiếu protocol (ví dụ: localhost:8080/...)
       const normalizedFiles = knowledgeFiles.map(file => {
@@ -106,12 +106,12 @@ router.post('/gems', async (req, res, next) => {
           if (file.startsWith('http://') || file.startsWith('https://')) {
             return file;
           }
-
+          
           // Nếu là absolute path (Windows: C:\..., Unix: /...), giữ nguyên
           if (path.isAbsolute(file) || file.startsWith('/')) {
             return file;
           }
-
+          
           // Kiểm tra xem có phải URL thiếu protocol không (pattern: hostname:port/path)
           // Ví dụ: localhost:8080/api/..., example.com:3000/files/...
           if (file.match(/^[a-zA-Z0-9.-]+:\d+\//) || file.match(/^[a-zA-Z0-9.-]+:\d+$/)) {
@@ -121,12 +121,12 @@ router.post('/gems', async (req, res, next) => {
         }
         return file;
       });
-
+      
       // Phân loại: URLs (http/https) vs local paths
-      const urlFiles = normalizedFiles.filter(file =>
+      const urlFiles = normalizedFiles.filter(file => 
         typeof file === 'string' && (file.startsWith('http://') || file.startsWith('https://'))
       );
-      const localFiles = normalizedFiles.filter(file =>
+      const localFiles = normalizedFiles.filter(file => 
         typeof file === 'string' && !file.startsWith('http://') && !file.startsWith('https://')
       );
 
@@ -135,11 +135,11 @@ router.post('/gems', async (req, res, next) => {
       if (urlFiles.length > 0 || localFiles.length > 0) {
         await logService.logInfo(finalEntityType, finalEntityID, finalUserID, 'files_downloading',
           `Bắt đầu download files từ URLs`, {
-          files_count: urlFiles.length + localFiles.length,
-          url_files_count: urlFiles.length,
-          local_files_count: localFiles.length,
-          gem_name: gemName || name || 'unknown'
-        });
+            files_count: urlFiles.length + localFiles.length,
+            url_files_count: urlFiles.length,
+            local_files_count: localFiles.length,
+            gem_name: gemName || name || 'unknown'
+          });
       }
 
       if (urlFiles.length > 0) {
@@ -159,18 +159,18 @@ router.post('/gems', async (req, res, next) => {
 
           await logService.logError(finalEntityType, finalEntityID, finalUserID, 'files_downloaded',
             `Một số files download thất bại: ${downloadResult.summary.failed}/${downloadResult.summary.total}`, {
-            files_count: downloadResult.summary.total,
-            success_count: downloadResult.summary.success,
-            failed_count: downloadResult.summary.failed,
-            gem_name: gemName || name || 'unknown'
-          });
+              files_count: downloadResult.summary.total,
+              success_count: downloadResult.summary.success,
+              failed_count: downloadResult.summary.failed,
+              gem_name: gemName || name || 'unknown'
+            });
         } else {
 
           await logService.logSuccess(finalEntityType, finalEntityID, finalUserID, 'files_downloaded',
             `Đã download xong tất cả files`, {
-            files_count: downloadResult.summary.total,
-            gem_name: gemName || name || 'unknown'
-          });
+              files_count: downloadResult.summary.total,
+              gem_name: gemName || name || 'unknown'
+            });
         }
 
         // Lấy local paths từ kết quả download (chỉ lấy những file download thành công)
@@ -190,69 +190,69 @@ router.post('/gems', async (req, res, next) => {
     // Log: Gem creating
     await logService.logInfo(finalEntityType, finalEntityID, finalUserID, 'gem_creating',
       `Bắt đầu tạo Gem trên Gemini`, {
-      gem_name: gemName || name || 'unknown',
-      files_count: finalKnowledgeFiles.length
-    });
+        gem_name: gemName || name || 'unknown',
+        files_count: finalKnowledgeFiles.length
+      });
 
     // Bước 3: Tạo Gem với local file paths
-    const out = await createGem({
-      userDataDir,
-      name: gemName,
-      description,
-      instructions,
-      knowledgeFiles: finalKnowledgeFiles,
+    const out = await createGem({ 
+      userDataDir, 
+      name: gemName, 
+      description, 
+      instructions, 
+      knowledgeFiles: finalKnowledgeFiles, 
       debugPort,
       entityType: finalEntityType,
       entityID: finalEntityID,
       userID: finalUserID
     });
-
+    
     // Kiểm tra status từ createGem để xác định có thành công không
     const gemStatus = out.status || 'unknown';
     const gemId = out.id || out.gem_id || out.gemId || 'unknown';
     const finalGemName = out.name || gemName || name || 'unknown';
-
+    
     // Chỉ log success khi thực sự tạo thành công (status = 'gem_created')
     if (gemStatus === 'gem_created' && !out.error) {
       await logService.logSuccess(finalEntityType, finalEntityID, finalUserID, 'gem_created',
         'Gem đã được tạo thành công trên Gemini', {
-        gem_name: finalGemName,
-        files_count: finalKnowledgeFiles.length,
-        gem_id: gemId !== 'unknown' ? gemId : undefined
-      });
-
+          gem_name: finalGemName,
+          files_count: finalKnowledgeFiles.length,
+          gem_id: gemId !== 'unknown' ? gemId : undefined
+        });
+      
       // Log: Completed
       await logService.logSuccess(finalEntityType, finalEntityID, finalUserID, 'create_gem_completed',
         'Toàn bộ quá trình hoàn thành', {
-        gem_name: finalGemName,
-        files_count: finalKnowledgeFiles.length,
-        gem_id: gemId !== 'unknown' ? gemId : undefined
-      });
+          gem_name: finalGemName,
+          files_count: finalKnowledgeFiles.length,
+          gem_id: gemId !== 'unknown' ? gemId : undefined
+        });
     } else if (gemStatus === 'gem_form_filled_but_not_saved') {
       // Log warning nếu form đã được điền nhưng không save được
       await logService.logWarning(finalEntityType, finalEntityID, finalUserID, 'gem_creating',
         'Gem form đã được điền nhưng không thể save (có thể bị treo ở modal)', {
-        gem_name: finalGemName,
-        status: gemStatus,
-        files_count: finalKnowledgeFiles.length
-      });
+          gem_name: finalGemName,
+          status: gemStatus,
+          files_count: finalKnowledgeFiles.length
+        });
     } else {
       // Log warning cho các trường hợp khác
       await logService.logError(finalEntityType, finalEntityID, finalUserID, 'gem_creating',
         `Gem creation không hoàn thành: status=${gemStatus}`, {
-        gem_name: finalGemName,
-        status: gemStatus,
-        error: out.error || undefined
-      });
+          gem_name: finalGemName,
+          status: gemStatus,
+          error: out.error || undefined
+        });
     }
-
+    
     return res.json(out);
   } catch (err) {
     // Log error - cần resolve lại context vì có thể chưa resolve userDataDir
     const { name: errorName, userDataDir: errorUserDataDir, profileDirName: errorProfileDirName } = req.body || {};
     let errorContextKey = null;
     let errorContext = null;
-
+    
     try {
       const errorResolvedUserDataDir = await resolveUserDataDir({
         userDataDir: errorUserDataDir,
@@ -264,14 +264,14 @@ router.post('/gems', async (req, res, next) => {
     } catch (_) {
       // Ignore
     }
-
+    
     const errorEntityType = errorContext?.entityType || req.headers['x-entity-type'] || req.body.entity_type || 'topic';
     const errorEntityID = errorContext?.entityID || req.headers['x-entity-id'] || req.body.entity_id || 'unknown';
     const errorUserID = errorContext?.userID || req.headers['x-user-id'] || req.body.user_id || 'unknown';
-
+    
     await logService.logError(errorEntityType, errorEntityID, errorUserID, 'gem_creating',
       `Failed to create Gem: ${err.message}`, { error: err.message });
-
+    
     return next(err);
   }
 });
@@ -361,20 +361,20 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
     if (!parsed.success) {
       return res.status(400).json({ error: 'ValidationError', details: parsed.error.issues });
     }
-
-    const {
-      name,
-      userDataDir: inputUserDataDir,
-      profileDirName,
-      debugPort,
-      gem,
+    
+    const { 
+      name, 
+      userDataDir: inputUserDataDir, 
+      profileDirName, 
+      debugPort, 
+      gem, 
       notebooklmPrompt,
       website,
       youtube,
       textContent,
       sendPromptText
     } = parsed.data;
-
+    
     const userDataDir = await resolveUserDataDir({
       userDataDir: inputUserDataDir,
       name,
@@ -407,11 +407,11 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
     // Dùng finalProfileDirName làm key (giống chrome.js)
     const contextKey = finalProfileDirName;
     const savedContext = entityContextService.get(contextKey);
-
+    
     let finalEntityType = 'topic';
     let finalEntityID = 'unknown';
     let finalUserID = 'unknown';
-
+    
     if (savedContext) {
       finalEntityType = savedContext.entityType || 'topic';
       finalEntityID = savedContext.entityID || 'unknown';
@@ -424,11 +424,11 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
 
     await logService.logInfo(finalEntityType, finalEntityID, finalUserID, 'outline_generation_started',
       'Bắt đầu tạo dàn ý bằng NotebookLM', {
-      gem_name: gem,
-      has_website: !!(website && website.length > 0),
-      has_youtube: !!(youtube && youtube.length > 0),
-      has_text_content: !!textContent
-    });
+        gem_name: gem,
+        has_website: !!(website && website.length > 0),
+        has_youtube: !!(youtube && youtube.length > 0),
+        has_text_content: !!textContent
+      });
 
     if (profileMonitorService.setAutomationStatus(userDataDir, finalProfileDirName, 'running')) {
       profileStatusEvent.emitAutomationStatusChange(finalProfileDirName || userDataDir, 'running', {
@@ -439,22 +439,22 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
         userID: finalUserID
       });
     }
-
+    
     const outlinesDir = path.join(userDataDir, 'outlines');
     if (!fs.existsSync(outlinesDir)) {
       fs.mkdirSync(outlinesDir, { recursive: true });
     }
-
+    
     const timestamp = Date.now();
     const outlineFileName = `outline_${timestamp}.txt`;
     const outlineFilePath = path.join(outlinesDir, outlineFileName);
-
+    
     await logService.logInfo(finalEntityType, finalEntityID, finalUserID, 'notebooklm_running',
       'Đang chạy NotebookLM để tạo dàn ý', {
-      gem_name: gem,
-      outline_file: outlineFileName
-    });
-
+        gem_name: gem,
+        outline_file: outlineFileName
+      });
+    
     const notebooklmResult = await launchNotebookLM({
       userDataDir,
       debugPort,
@@ -467,13 +467,13 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
       entityID: finalEntityID,
       userID: finalUserID
     });
-
+    
     if (notebooklmResult.status === 'not_logged_in') {
       await logService.logError(finalEntityType, finalEntityID, finalUserID, 'notebooklm_not_logged_in',
         'Người dùng chưa đăng nhập NotebookLM', {
-        gem_name: gem
-      });
-
+          gem_name: gem
+        });
+      
       const finalProfileDirName = profileDirName || 'Default';
       if (profileMonitorService.setAutomationStatus(userDataDir, finalProfileDirName, 'idle')) {
         profileStatusEvent.emitAutomationStatusChange(finalProfileDirName || userDataDir, 'idle', {
@@ -484,20 +484,20 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
           userID: finalUserID
         });
       }
-
-      return res.json({
+      
+      return res.json({ 
         status: 'notebooklm_not_logged_in',
         error: 'User not logged in to NotebookLM'
       });
     }
-
+    
     if (notebooklmResult.status === 'failed') {
       await logService.logError(finalEntityType, finalEntityID, finalUserID, 'notebooklm_failed',
         `NotebookLM tạo dàn ý thất bại: ${notebooklmResult.error || 'Unknown error'}`, {
-        gem_name: gem,
-        error: notebooklmResult.error || 'Failed to generate outline'
-      });
-
+          gem_name: gem,
+          error: notebooklmResult.error || 'Failed to generate outline'
+        });
+      
       const finalProfileDirName = profileDirName || 'Default';
       if (profileMonitorService.setAutomationStatus(userDataDir, finalProfileDirName, 'idle')) {
         profileStatusEvent.emitAutomationStatusChange(finalProfileDirName || userDataDir, 'idle', {
@@ -508,20 +508,20 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
           userID: finalUserID
         });
       }
-
-      return res.json({
+      
+      return res.json({ 
         status: 'notebooklm_failed',
         error: notebooklmResult.error || 'Failed to generate outline'
       });
     }
-
+    
     if (!fs.existsSync(outlineFilePath)) {
       await logService.logError(finalEntityType, finalEntityID, finalUserID, 'outline_file_not_created',
         'File dàn ý không được tạo bởi NotebookLM', {
-        gem_name: gem,
-        expected_file: outlineFilePath
-      });
-
+          gem_name: gem,
+          expected_file: outlineFilePath
+        });
+      
       const finalProfileDirName = profileDirName || 'Default';
       if (profileMonitorService.setAutomationStatus(userDataDir, finalProfileDirName, 'idle')) {
         profileStatusEvent.emitAutomationStatusChange(finalProfileDirName || userDataDir, 'idle', {
@@ -532,25 +532,25 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
           userID: finalUserID
         });
       }
-
-      return res.json({
+      
+      return res.json({ 
         status: 'outline_file_not_created',
         error: 'Outline file was not created by NotebookLM'
       });
     }
-
+    
     await logService.logSuccess(finalEntityType, finalEntityID, finalUserID, 'outline_generated',
       'Đã tạo dàn ý thành công từ NotebookLM', {
-      gem_name: gem,
-      outline_file: outlineFileName
-    });
-
+        gem_name: gem,
+        outline_file: outlineFileName
+      });
+    
     await logService.logInfo(finalEntityType, finalEntityID, finalUserID, 'uploading_to_gemini',
       'Đang upload dàn ý lên Gemini', {
-      gem_name: gem,
-      outline_file: outlineFileName
-    });
-
+        gem_name: gem,
+        outline_file: outlineFileName
+      });
+    
     const sendPromptResult = await sendPrompt({
       userDataDir,
       debugPort,
@@ -564,58 +564,58 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
         if (stage === 'text_copied' && metadata && metadata.text) {
           await logService.logInfo(finalEntityType, finalEntityID, finalUserID, 'text_copied',
             'Đã copy text từ Gemini', {
-            gem_name: gem,
-            text_length: metadata.text_length || 0,
-            text: metadata.text
-          });
+              gem_name: gem,
+              text_length: metadata.text_length || 0,
+              text: metadata.text
+            });
         } else if (stage === 'gemini_generating') {
           await logService.logInfo(finalEntityType, finalEntityID, finalUserID, 'gemini_generating',
             message || 'Đang chờ Gemini tạo kịch bản', {
-            gem_name: gem
-          });
+              gem_name: gem
+            });
         } else if (stage === 'gemini_completed') {
           await logService.logSuccess(finalEntityType, finalEntityID, finalUserID, 'gemini_completed',
             message || 'Gemini đã tạo kịch bản xong', {
-            gem_name: gem
-          });
+              gem_name: gem
+            });
         } else if (stage === 'file_uploading') {
           await logService.logInfo(finalEntityType, finalEntityID, finalUserID, 'file_uploading',
             message || 'Đang upload file', {
-            gem_name: gem,
-            file_count: metadata?.file_count || 0
-          });
+              gem_name: gem,
+              file_count: metadata?.file_count || 0
+            });
         } else if (stage === 'file_uploaded') {
           await logService.logSuccess(finalEntityType, finalEntityID, finalUserID, 'file_uploaded',
             message || 'Đã upload file thành công', {
-            gem_name: gem,
-            file_count: metadata?.file_count || 0
-          });
+              gem_name: gem,
+              file_count: metadata?.file_count || 0
+            });
         }
       }
     });
-
+    
     if (sendPromptResult.status === 'success' || sendPromptResult.status === 'prompt_sent') {
       await logService.logSuccess(finalEntityType, finalEntityID, finalUserID, 'outline_uploaded',
         'Đã upload dàn ý lên Gemini thành công', {
-        gem_name: gem,
-        outline_file: outlineFileName
-      });
-
+          gem_name: gem,
+          outline_file: outlineFileName
+        });
+      
       // Log text copied if available (gửi toàn bộ text để backend cloud forward lên FE)
       if (sendPromptResult.copiedText) {
         await logService.logInfo(finalEntityType, finalEntityID, finalUserID, 'text_copied_final',
           'Text đã được copy từ Gemini', {
-          gem_name: gem,
-          text_length: sendPromptResult.copiedText.length,
-          text: sendPromptResult.copiedText
-        });
+            gem_name: gem,
+            text_length: sendPromptResult.copiedText.length,
+            text: sendPromptResult.copiedText
+          });
       }
-
+      
       await logService.logSuccess(finalEntityType, finalEntityID, finalUserID, 'generate_outline_completed',
         'Toàn bộ quá trình tạo và upload dàn ý hoàn thành', {
-        gem_name: gem,
-        outline_file: outlineFileName
-      });
+          gem_name: gem,
+          outline_file: outlineFileName
+        });
 
       if (profileMonitorService.setAutomationStatus(userDataDir, finalProfileDirName, 'idle')) {
         profileStatusEvent.emitAutomationStatusChange(finalProfileDirName || userDataDir, 'idle', {
@@ -629,11 +629,11 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
     } else {
       await logService.logWarning(finalEntityType, finalEntityID, finalUserID, 'outline_upload_failed',
         `Upload dàn ý lên Gemini không thành công: ${sendPromptResult.status}`, {
-        gem_name: gem,
-        outline_file: outlineFileName,
-        status: sendPromptResult.status,
-        error: sendPromptResult.error || undefined
-      });
+          gem_name: gem,
+          outline_file: outlineFileName,
+          status: sendPromptResult.status,
+          error: sendPromptResult.error || undefined
+        });
 
       if (profileMonitorService.setAutomationStatus(userDataDir, finalProfileDirName, 'idle')) {
         profileStatusEvent.emitAutomationStatusChange(finalProfileDirName || userDataDir, 'idle', {
@@ -645,7 +645,7 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
         });
       }
     }
-
+    
     // Xóa file outline sau khi hoàn thành (thành công hoặc thất bại) để tránh tích lũy
     if (fs.existsSync(outlineFilePath)) {
       try {
@@ -654,7 +654,7 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
         // Ignore error khi xóa file
       }
     }
-
+    
     return res.json({
       status: 'success',
       notebooklm: notebooklmResult,
@@ -666,7 +666,7 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
     const { name: errorName, userDataDir: errorUserDataDir, profileDirName: errorProfileDirName } = req.body || {};
     let errorContextKey = null;
     let errorContext = null;
-
+    
     try {
       const errorResolvedUserDataDir = await resolveUserDataDir({
         userDataDir: errorUserDataDir,
@@ -678,16 +678,16 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
     } catch (_) {
       // Ignore
     }
-
+    
     const errorEntityType = errorContext?.entityType || req.headers['x-entity-type'] || req.body.entity_type || 'topic';
     const errorEntityID = errorContext?.entityID || req.headers['x-entity-id'] || req.body.entity_id || 'unknown';
     const errorUserID = errorContext?.userID || req.headers['x-user-id'] || req.body.user_id || 'unknown';
-
+    
     await logService.logError(errorEntityType, errorEntityID, errorUserID, 'generate_outline_failed',
-      `Lỗi khi tạo và upload dàn ý: ${err.message}`, {
-      error: err.message,
-      gem_name: req.body?.gem || 'unknown'
-    });
+      `Lỗi khi tạo và upload dàn ý: ${err.message}`, { 
+        error: err.message,
+        gem_name: req.body?.gem || 'unknown'
+      });
 
     try {
       const errorResolvedUserDataDir = await resolveUserDataDir({
@@ -708,7 +708,7 @@ router.post('/generate-outline-and-upload', async (req, res, next) => {
     } catch (_) {
       // Ignore
     }
-
+    
     logger.error({ err }, '[Gemini] Error in generate-outline-and-upload');
     return next(err);
   }
@@ -765,6 +765,7 @@ const projectSchema = z.object({
     prompt: z.string().min(1),
     output: z.string().optional(), // File name only (e.g., "p1" or "p1.csv"), will be saved as .csv to userDataDir/execution_results/<execution_id>/
     input_files: z.array(z.string()).optional(), // Array of file names (e.g., ["p1", "merged"]), will be resolved from execution_results folders
+    input_files_urls: z.array(z.string()).optional(), // Array of URLs to download files from backend cloud (e.g., ["https://api.example.com/files/123"])
     exit: z.boolean().optional().default(false),
     merge: z.boolean().optional().default(false),
     prompt_id: z.string().optional()
@@ -1000,6 +1001,97 @@ router.post('/projects', async (req, res, next) => {
       }
     };
 
+    // Helper function: Normalize and download files from URLs (similar to /gems API)
+    // Returns array of local file paths
+    const normalizeAndDownloadFiles = async (fileUrls, promptId, execId) => {
+      if (!fileUrls || fileUrls.length === 0) return [];
+      
+      // Normalize URLs: thêm http:// nếu thiếu protocol (ví dụ: localhost:8080/...)
+      const normalizedFiles = fileUrls.map(file => {
+        if (typeof file === 'string') {
+          // Nếu đã có protocol, giữ nguyên
+          if (file.startsWith('http://') || file.startsWith('https://')) {
+            return file;
+          }
+          
+          // Nếu là absolute path (Windows: C:\..., Unix: /...), giữ nguyên
+          if (path.isAbsolute(file) || file.startsWith('/')) {
+            return file;
+          }
+          
+          // Kiểm tra xem có phải URL thiếu protocol không (pattern: hostname:port/path)
+          // Ví dụ: localhost:8080/api/..., example.com:3000/files/...
+          if (file.match(/^[a-zA-Z0-9.-]+:\d+\//) || file.match(/^[a-zA-Z0-9.-]+:\d+$/)) {
+            // Có vẻ là URL nhưng thiếu protocol
+            return `http://${file}`;
+          }
+        }
+        return file;
+      });
+      
+      // Phân loại: URLs (http/https) vs local paths
+      const urlFiles = normalizedFiles.filter(file => 
+        typeof file === 'string' && (file.startsWith('http://') || file.startsWith('https://'))
+      );
+      const localFiles = normalizedFiles.filter(file => 
+        typeof file === 'string' && !file.startsWith('http://') && !file.startsWith('https://')
+      );
+
+      // Download files từ URLs nếu có
+      let downloadedLocalPaths = [];
+      if (urlFiles.length > 0) {
+        // Tạo thư mục input_files trong execution_results/<execution_id>/
+        // Nếu không có execution_id, dùng knowledge_files folder
+        let destinationDir;
+        if (execId) {
+          destinationDir = path.join(userDataDir, 'execution_results', execId, 'input_files');
+        } else {
+          destinationDir = path.join(userDataDir, 'knowledge_files');
+        }
+        await fs.ensureDir(destinationDir);
+
+        await logService.logInfo(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'files_downloading',
+          `Bắt đầu download files từ URLs cho prompt ${promptId}`, {
+            prompt_id: promptId,
+            files_count: urlFiles.length,
+            execution_id: execId || null
+          });
+
+        // Download files từ URLs
+        const downloadResult = await downloadFiles({
+          fileUrls: urlFiles,
+          destinationDir
+        });
+
+        // Log kết quả download
+        if (downloadResult.summary.failed > 0) {
+          await logService.logError(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'files_downloaded',
+            `Một số files download thất bại cho prompt ${promptId}: ${downloadResult.summary.failed}/${downloadResult.summary.total}`, {
+              prompt_id: promptId,
+              files_count: downloadResult.summary.total,
+              success_count: downloadResult.summary.success,
+              failed_count: downloadResult.summary.failed,
+              execution_id: execId || null
+            });
+        } else {
+          await logService.logSuccess(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'files_downloaded',
+            `Đã download xong tất cả files cho prompt ${promptId}`, {
+              prompt_id: promptId,
+              files_count: downloadResult.summary.total,
+              execution_id: execId || null
+            });
+        }
+
+        // Lấy local paths từ kết quả download (chỉ lấy những file download thành công)
+        downloadedLocalPaths = downloadResult.results
+          .filter(r => r.success && r.filePath)
+          .map(r => r.filePath);
+      }
+
+      // Kết hợp local paths (từ download) + local files (đã có sẵn)
+      return [...downloadedLocalPaths, ...localFiles];
+    };
+
     const results = [];
     const globalMergeBuffer = []; // Buffer for merge=true prompts
     let needsGemClick = true;
@@ -1042,7 +1134,7 @@ router.post('/projects', async (req, res, next) => {
     try {
       for (let i = 0; i < prompts.length; i++) {
         const promptItem = prompts[i];
-        const { prompt, output: outputFileName, input_files, exit, merge, prompt_id } = promptItem;
+        const { prompt, output: outputFileName, input_files, input_files_urls, exit, merge, prompt_id } = promptItem;
 
         // Resolve input_files: find files from previous executions
         let resolvedInputFiles = null;
@@ -1067,6 +1159,40 @@ router.post('/projects', async (req, res, next) => {
           }, '[Projects] Resolved input_files');
         }
 
+        // Download files from URLs (input_files_urls) - only for first prompt (needsGemClick = true)
+        // Note: Files are only uploaded when needsGemClick = true (first prompt in conversation)
+        // Subsequent prompts reuse the same conversation, so files don't need to be uploaded again
+        let downloadedFiles = [];
+        if (input_files_urls && input_files_urls.length > 0 && needsGemClick) {
+          downloadedFiles = await normalizeAndDownloadFiles(
+            input_files_urls,
+            prompt_id || `prompt_${i + 1}`,
+            execution_id
+          );
+          logger.info({ 
+            prompt_id: prompt_id || `prompt_${i + 1}`,
+            input_files_urls,
+            downloadedFiles,
+            needsGemClick
+          }, '[Projects] Downloaded files from URLs');
+        } else if (input_files_urls && input_files_urls.length > 0 && !needsGemClick) {
+          logger.info({ 
+            prompt_id: prompt_id || `prompt_${i + 1}`,
+            input_files_urls,
+            needsGemClick
+          }, '[Projects] Skipping download for input_files_urls (not first prompt, files already in conversation)');
+        }
+
+        // Merge resolvedInputFiles (from input_files) + downloadedFiles (from input_files_urls)
+        let finalInputFiles = null;
+        const allInputFiles = [
+          ...(resolvedInputFiles || []),
+          ...downloadedFiles
+        ];
+        if (allInputFiles.length > 0) {
+          finalInputFiles = allInputFiles;
+        }
+
         // Resolve output path: userDataDir/execution_results/<execution_id>/<outputFileName>
         const outputPath = outputFileName ? resolveExecutionFilePath(outputFileName, execution_id) : null;
         if (outputPath) {
@@ -1077,15 +1203,6 @@ router.post('/projects', async (req, res, next) => {
             execution_id
           }, '[Projects] Resolved output path');
         }
-
-        logger.info({ 
-          project, 
-          gem_name: gemName, 
-          prompt_index: i, 
-          total_prompts: prompts.length,
-          prompt_id: prompt_id || `prompt_${i + 1}`,
-          needsGemClick 
-        }, `[DEBUG] Bắt đầu vòng lặp prompt ${i + 1}/${prompts.length}`);
 
         await logService.logInfo(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'prompt_processing',
           `Đang xử lý prompt ${i + 1}/${prompts.length}`, {
@@ -1100,25 +1217,17 @@ router.post('/projects', async (req, res, next) => {
           let promptResult;
           
           if (needsGemClick) {
-            logger.info({ 
-              project, 
-              gem_name: gemName, 
-              prompt_id: prompt_id || `prompt_${i + 1}` 
-            }, `[DEBUG] Gọi sendPrompt cho prompt ${i + 1}`);
             promptResult = await sendPrompt({
               userDataDir,
               debugPort: currentDebugPort,
               gem: gemName,
-              listFile: resolvedInputFiles || undefined,
+              listFile: finalInputFiles || undefined,
               prompt,
               entityType: finalEntityTypeFromContext,
               entityID: finalEntityIDFromContext,
               userID: finalUserIDFromContext,
               onProgress: async (stage, message, metadata) => {
                 if (stage === 'text_copied' && metadata && metadata.text) {
-                  // [DEBUG] Log raw event
-                  logger.info({ prompt_id: prompt_id || `prompt_${i + 1}`, merge, text_len: metadata.text_length }, '[DEBUG] onProgress text_copied received');
-                  
                   if (!merge) {
                     await logService.logInfo(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'prompt_response_received',
                       `Đã nhận response từ Gemini cho prompt ${prompt_id || `prompt_${i + 1}`}`, {
@@ -1129,26 +1238,12 @@ router.post('/projects', async (req, res, next) => {
                         text: metadata.text,
                         execution_id: execution_id || null
                       });
-                  } else {
-                     logger.info({ prompt_id: prompt_id || `prompt_${i + 1}` }, '[DEBUG] Suppressing prompt_response_received event due to merge=true');
                   }
                 }
               }
             });
             needsGemClick = false;
-            logger.info({ 
-              project, 
-              gem_name: gemName, 
-              prompt_id: prompt_id || `prompt_${i + 1}`,
-              status: promptResult?.status,
-              hasText: !!promptResult?.copiedText
-            }, `[DEBUG] Đã hoàn thành sendPrompt cho prompt ${i + 1}`);
           } else {
-            logger.info({ 
-              project, 
-              gem_name: gemName, 
-              prompt_id: prompt_id || `prompt_${i + 1}` 
-            }, `[DEBUG] Gọi sendNextPrompt cho prompt ${i + 1}`);
             // Note: sendNextPrompt doesn't support listFile (files are already in conversation)
             // Only sendPrompt (first prompt) needs listFile
             promptResult = await sendNextPrompt({
@@ -1160,9 +1255,6 @@ router.post('/projects', async (req, res, next) => {
               userID: finalUserIDFromContext,
               onProgress: async (stage, message, metadata) => {
                 if (stage === 'text_copied' && metadata && metadata.text) {
-                   // [DEBUG] Log raw event
-                  logger.info({ prompt_id: prompt_id || `prompt_${i + 1}`, merge, text_len: metadata.text_length }, '[DEBUG] onProgress (next) text_copied received');
-
                   if (!merge) {
                     await logService.logInfo(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'prompt_response_received',
                       `Đã nhận response từ Gemini cho prompt ${prompt_id || `prompt_${i + 1}`}`, {
@@ -1173,29 +1265,11 @@ router.post('/projects', async (req, res, next) => {
                         text: metadata.text,
                         execution_id: execution_id || null
                       });
-                  } else {
-                     logger.info({ prompt_id: prompt_id || `prompt_${i + 1}` }, '[DEBUG] Suppressing prompt_response_received event due to merge=true');
                   }
                 }
               }
             });
-            logger.info({ 
-              project, 
-              gem_name: gemName, 
-              prompt_id: prompt_id || `prompt_${i + 1}`,
-              status: promptResult?.status,
-              hasText: !!promptResult?.copiedText
-            }, `[DEBUG] Đã hoàn thành sendNextPrompt cho prompt ${i + 1}`);
           }
-
-          logger.info({ 
-            project, 
-            gem_name: gemName, 
-            prompt_id: prompt_id || `prompt_${i + 1}`,
-            status: promptResult?.status,
-            hasText: !!promptResult?.copiedText,
-            error: promptResult?.error
-          }, `[DEBUG] Kiểm tra kết quả prompt ${i + 1}`);
 
           if (promptResult.status === 'success' && promptResult.copiedText) {
             const text = promptResult.copiedText;
@@ -1301,12 +1375,6 @@ router.post('/projects', async (req, res, next) => {
                   debugPort: currentDebugPort // Giữ nguyên debugPort khi restart
                 };
 
-                logger.info({ 
-                  project, 
-                  gem_name: gemName, 
-                  debugPort: currentDebugPort,
-                  prompt_id: prompt_id || `prompt_${i + 1}`
-                }, '[DEBUG] Restart profile với debugPort');
 
                 await launchChromeProfile(launchParams);
                 
@@ -1321,7 +1389,7 @@ router.post('/projects', async (req, res, next) => {
                     gem_name: gemName,
                     requestedPort: currentDebugPort,
                     actualPort: newDebugPort
-                  }, '[DEBUG] Port sau restart khác với port yêu cầu');
+                  }, '[Projects] Port sau restart khác với port yêu cầu');
                 }
                 
                 currentDebugPort = newDebugPort;
@@ -1378,14 +1446,6 @@ router.post('/projects', async (req, res, next) => {
              }
           }
 
-          logger.info({ 
-            project, 
-            gem_name: gemName, 
-            prompt_id: prompt_id || `prompt_${i + 1}`,
-            next_index: i + 1,
-            total_prompts: prompts.length,
-            will_continue: i + 1 < prompts.length
-          }, `[DEBUG] Đã xử lý xong prompt ${i + 1}, ${i + 1 < prompts.length ? 'sẽ tiếp tục' : 'đã hết prompts'}`);
         } catch (promptError) {
           logger.error({ 
             project, 
@@ -1393,7 +1453,7 @@ router.post('/projects', async (req, res, next) => {
             prompt_id: prompt_id || `prompt_${i + 1}`,
             error: promptError.message,
             stack: promptError.stack
-          }, `[DEBUG] Lỗi trong catch block của prompt ${i + 1}`);
+          }, `[Projects] Error processing prompt ${i + 1}`);
 
           await logService.logError(finalEntityTypeFromContext, finalEntityIDFromContext, finalUserIDFromContext, 'prompt_error',
             `Lỗi khi xử lý prompt ${prompt_id || `prompt_${i + 1}`}`, {

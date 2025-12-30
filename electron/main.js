@@ -175,9 +175,9 @@ async function startAPIServer() {
       process.env.APP_ROOT = projectRoot
       writeLog('info', 'Updated paths for production', { projectRoot, srcPath, envPath })
     }
-    
+      
     // Load modules if not loaded yet (should already be loaded in app.whenReady, but just in case)
-    if (!logService || !constants) {
+      if (!logService || !constants) {
       writeLog('info', 'Loading modules in startAPIServer...')
       try {
         const backendRequire = createRequire(import.meta.url)
@@ -417,8 +417,8 @@ function getFrpcExecutable() {
     possiblePaths.push(path.join(resourcesPath, 'electron', 'tunnel', exeName))
   } else {
     // Development mode
-    const projectRoot = path.join(__dirname, '..')
-    
+  const projectRoot = path.join(__dirname, '..')
+  
     // 1. electron/tunnel/ (dev mode)
     possiblePaths.push(path.join(projectRoot, 'electron', 'tunnel', exeName))
     
@@ -969,17 +969,17 @@ app.whenReady().then(async () => {
     process.env.APP_ROOT = projectRoot
     writeLog('info', 'Paths updated for production', { projectRoot, srcPath, envPath })
   }
-  
+    
   // Always load modules in app.whenReady (not at top-level to avoid initialization errors)
-  if (!logService || !constants) {
+    if (!logService || !constants) {
     writeLog('info', 'Loading modules in app.whenReady...')
-    try {
-      const backendRequire = createRequire(import.meta.url)
+      try {
+        const backendRequire = createRequire(import.meta.url)
       const currentSrcPath = app.isPackaged ? srcPath : path.join(__dirname, '..', 'src')
       logService = backendRequire(path.join(currentSrcPath, 'services', 'logService'))
       constants = backendRequire(path.join(currentSrcPath, 'constants', 'constants'))
       writeLog('success', 'Modules loaded successfully', { srcPath: currentSrcPath })
-    } catch (error) {
+      } catch (error) {
       writeLog('error', 'Failed to load modules', { error: error.message, stack: error.stack })
       // Don't throw, let app continue with fallback values
     }
